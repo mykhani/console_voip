@@ -47,20 +47,24 @@ int main(int argc, char *argv[])
 	}
 
 	while (1) {
+		/* Read the frame of samples from audio file */
 		fread(samples, sizeof(short), FRAME_SIZE, fin);
-		if (feof(fin))
+		if(feof(fin))
 			break;
+		
 		speex_bits_reset(&bits);
 
 		/* Encode here */
 		speex_encode_int(state, samples, &bits);
 		/* Write the encoded bits to array of bytes so that they can be written */
-		tmp = speex_bits_write(&bits, bytes, 200);
-		fwrite(bytes, sizeof(char), tmp, fout);
-		/* Add the number of bytes written to total bytes */
-		nbytes += tmp;
+		nbytes = speex_bits_write(&bits, bytes, 200);
+	
+		/* Write the size of encoded frame first */
+		fwrite(&nbytes, sizeof(int), 1, fout);
+
+		/* Write the encoded frame itself*/
+		fwrite(bytes, sizeof(char), nbytes, fout);
 	}
-	printf("Encoded %d bytes \r\n", nbytes);
 	
 free: 
 	printf("Freeing up resources \r\n");
