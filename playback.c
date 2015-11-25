@@ -4,6 +4,8 @@
 
 #include <alsa/asoundlib.h>
 
+#define FRAMES_PER_PERIOD 128
+
 /* Use the newer ALSA API */
 #define ALSA_PCM_NEW_HW_PARAMS_API
 
@@ -19,8 +21,8 @@ int main(int argc, char *argv[])
 	int dir;
 	char *buffer;
 
-	/* open default PCM device for playback */
-	ret = snd_pcm_open(&handle, "default",
+	/* open PCM device for playback */
+	ret = snd_pcm_open(&handle, "plughw",
 			SND_PCM_STREAM_PLAYBACK, 0 );
 	if (ret < 0) {
 		fprintf(stderr,
@@ -53,8 +55,8 @@ int main(int argc, char *argv[])
 	snd_pcm_hw_params_set_rate_near(handle, params,
 					&rate, &dir);
 
-	/* set period size to 32 frames */
-	frames = 32;
+	/* set period size to FRAMES_PER_PERIOD frames */
+	frames = FRAMES_PER_PERIOD;
 	snd_pcm_hw_params_set_period_size_near(handle, params,
 					&frames, &dir);
 
