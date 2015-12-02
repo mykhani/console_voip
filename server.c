@@ -18,6 +18,11 @@
 #define dbg(x) {} 
 #endif
 
+struct connection_data {
+	struct sockaddr_in client;
+	int sockfd;
+};
+
 void *send_audio(void *arg)
 {
         /* send data over the socket */
@@ -37,18 +42,68 @@ void *play_audio(void *arg)
 }
 
 /* handler for maintaining call */
-void *connection_handler(void *socket_fd)
+void *connection_handler(void *data)
 {
-	int sockfd = *((int *)socket_fd);
-	int rc;
 	pthread_t sender, receiver, playback;
+	struct connection_data conn = *((struct connection_data *)data);
+	struct sockaddr_in client = conn.client;
+	int sockfd = conn.sockfd;
 
+	char ipstr[INET_ADDRSTRLEN]; /* holds the client ip address */
+	char buffer[BUFLEN];
+	char c;
+	int rc;
 	/* instantiate sender thread */
         dbg("Creating a sender thread");
 
+	/* Convert binary address (in network byte order) to ascii string */
+	inet_ntop(AF_INET, &client.sin_addr, ipstr, sizeof ipstr);
+	
+	printf("%s is calling \n", ipstr);
+	printf("Accept call? y/n : default [y]");
+	
+	c = getc(stdin);
+	if (c == 'n' || c == 'N') {
+        	/* reject the call */
+        	/* stop reception and transmission */
+        	printf("Rejecting call from %s \n",
+                	ipstr);
+		memset(buffer, 0, sizeof(buffer));
+                sprintf(buffer, "NO");
+                rc = write(sockfd, buffer, sizeof(buffer));
+                if (rc < 0) {
+                        fprintf(stderr, "Write to socket failed \n");
+                }
+
+		goto end;
+	}
+
+	memset(buffer, 0, sizeof(buffer));
+	dbg("Waiting to receive handshake msg from client");
+	rc = read(sockfd, buffer, sizeof(buffer));
+	if (rc < 0) {
+		fprintf(stderr, "Failed to read socket \n");
+		goto end;
+	} else if (rc > 0) {
+		printf("Msg from client : %s \n", buffer);
+		/* add a check on msg and send response */
+		memset(buffer, 0, sizeof(buffer));
+		sprintf(buffer, "OK");
+		rc = write(sockfd, buffer, sizeof(buffer));
+		if (rc < 0) {
+			fprintf(stderr, "Write to socket failed \n");
+			goto end;
+		}
+	
+	} else {
+		/* read returns 0 meaning end of connection */
+		fprintf(stderr, "Connection terminated with client \n");
+		goto end;
+	}
+
         if (rc = pthread_create(&sender, NULL, send_audio, NULL)) {
                 fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
-                goto failure;
+                goto end;
         }
 
         /* instantiate receiver thread */
@@ -56,7 +111,7 @@ void *connection_handler(void *socket_fd)
 	
 	if (rc = pthread_create(&receiver, NULL, receive_audio, NULL)) {
 		fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
-		goto failure;
+		goto end;
 	}
 	
 	/* instantiate playback thread */
@@ -64,7 +119,7 @@ void *connection_handler(void *socket_fd)
 	
 	if (rc = pthread_create(&playback, NULL, play_audio, NULL)) {
 		fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
-		goto failure;
+		goto end;
 	}
 	
 	dbg("Connection_handler waiting");
@@ -75,9 +130,15 @@ void *connection_handler(void *socket_fd)
 	
 	dbg("Exiting connection handler");
 	
-	pthread_exit(NULL);
-	
-failure:
+end:
+	/* stop reception and transmission */
+	if (rc = shutdown(sockfd, 2)) {
+		fprintf(stderr,
+			"Unable to end connection: %s \n",
+			strerror(errno));
+	}
+        /* close the socket so that it can be reused */
+        close(sockfd);
 	/* TODO: handle the failure condition */
 	/* Make sure end all the threads */
 	pthread_exit(NULL);
@@ -102,7 +163,7 @@ int main (int argc, char *argv[])
 	struct sockaddr_in server, client;
 	int addrlen;	
 	int sockfd, newsockfd;
-
+	struct connection_data conn;
 	/* Threads for sending, receiving and playback */
 	pthread_t call;
 
@@ -141,46 +202,19 @@ int main (int argc, char *argv[])
 	printf("Waiting for connection \n");
 	
 	while ((newsockfd = accept(sockfd, (struct sockaddr *)&client, &addrlen))) {
-		char c;
-		int ret;
-		char ipstr[INET_ADDRSTRLEN]; /* holds the client ip address */	
-
-		/* Convert binary address (in network byte order) to ascii string */
-		inet_ntop(AF_INET, &client.sin_addr, ipstr, sizeof ipstr);
-
-		printf("%s is calling \n", ipstr);
-		printf("Accept call? y/n : default [y]");
+		/* Instantiate a connection_handler thread to
+		 * handle call */
+		conn.client = client;
+		conn.sockfd = newsockfd;
 		
-		c = getc(stdin);
-		if (c == 'n' || c == 'N') {
-			/* reject the call */
-			/* stop reception and transmission */
-			printf("Rejecting call from %s \n",
-				ipstr);
+		pthread_create(&call, NULL, connection_handler, &conn);
+		/* wait for call to finish before accepting another call */
+		printf("Call in progress\n");
+		pthread_join(call, NULL);
 
-		} else {
-			/* Instantiate a connection_handler thread to
-			 * handle call */
-			pthread_create(&call, NULL, connection_handler, &newsockfd);
-			/* wait for call to finish before accepting another call */
-			printf("Call in progress\n");
-			pthread_join(call, NULL);
-
-			/* TODO: add duration of call */
-			printf("Call ended \n");
-
-		}
-		/* stop reception and transmission */
-		if (ret = shutdown(newsockfd, 2)) {
-			fprintf(stderr,
-				"Unable to end connection: %s \n",
-				strerror(errno));
-		}
-
-		/* close the socket so that it can be reused */
-		close(newsockfd);
-
-		printf("Waiting for call \n");	
+		/* TODO: add duration of call */
+		printf("Call ended \n");
+		printf("Waiting for connection \n");
 	}
 
 	if (newsockfd < 0) {
