@@ -2,79 +2,39 @@
  * Read an audio file and play it back
  */
 
-#include <alsa/asoundlib.h>
 
-#define FRAMES_PER_PERIOD 128
+#include "voip.h"
 
 /* Use the newer ALSA API */
 #define ALSA_PCM_NEW_HW_PARAMS_API
+#define SAMPLES_PER_PERIOD 128
+
 
 int main(int argc, char *argv[])
 {
+	int ret;
+	unsigned int rate = 8000;
+	int size;
+	char *buffer;
+	
 	snd_pcm_t *handle;
 	snd_pcm_hw_params_t *params;
-	snd_pcm_uframes_t frames;
+	snd_pcm_uframes_t frames = SAMPLES_PER_PERIOD;
+	
+        printf("rate is =%d \n", rate);
 
-	int ret;
-	unsigned int rate;
-	int size;
-	int dir;
-	char *buffer;
-
-	/* open PCM device for playback */
-	ret = snd_pcm_open(&handle, "plughw",
-			SND_PCM_STREAM_PLAYBACK, 0 );
-	if (ret < 0) {
-		fprintf(stderr,
-			"unable to open pcm device: %s\n",
-			snd_strerror(ret));
-		exit(1);
+	voip_init_pcm(&handle, &params, &frames, &rate);
+	printf("In playback main \n");
+	printf("Pointer address to handle=%p \n", &handle);
+        printf("Pointer to handle=%p \n", handle);
+	printf("Pointer to params=%p \n", params);
+	buffer = voip_alloc_buf(params, &frames, &size);
+	
+	if (!buffer) {
+		fprintf(stderr, "Unable to allocate buffer: %s \n", strerror(errno));
+		ret = -ENOMEM;
+		goto failure;
 	}
-	
-	/* allocate hardware parameters object */
-	snd_pcm_hw_params_alloca(&params);
-
-	/* fill it in with default values */
-	snd_pcm_hw_params_any(handle, params);
-
-	/* set the desired hardware parameters */
-	
-	/* interleaved mode */
-	snd_pcm_hw_params_set_access(handle, params,
-			SND_PCM_ACCESS_RW_INTERLEAVED);
-		
-	/* signed 16-bit little-endian format */
-	snd_pcm_hw_params_set_format(handle, params,
-			SND_PCM_FORMAT_S16_LE);
-
-	/* Two channels (stereo) */
-	snd_pcm_hw_params_set_channels(handle, params, 2);
-
-	/* 44100 bits/second sampling rate (cd quality) */
-	rate = 8000;
-	snd_pcm_hw_params_set_rate_near(handle, params,
-					&rate, &dir);
-
-	/* set period size to FRAMES_PER_PERIOD frames */
-	frames = FRAMES_PER_PERIOD;
-	snd_pcm_hw_params_set_period_size_near(handle, params,
-					&frames, &dir);
-
-	/* write the parameters to driver */
-	ret = snd_pcm_hw_params(handle, params);
-	if (ret < 0) {
-		fprintf(stderr,
-			"unable to set hardware parameters: %s \n",
-			snd_strerror(ret));
-		exit(1);
-	}
-
-	/* use a buffer large enough to hold one period */
-	snd_pcm_hw_params_get_period_size(params, &frames,
-					&dir);
-	
-	size = frames * 4; /* 2 bytes/sample, 2 channels */
-	buffer = malloc(size * sizeof(char));
 
 	while(1) {
 		ret = read(0, buffer, size); /* read from stdin */
@@ -86,27 +46,17 @@ int main(int argc, char *argv[])
 				"short read: read %d bytes \n", ret);
 		}
 		/* write frames in one period to device */
-		ret = snd_pcm_writei(handle, buffer, frames);
+		ret = voip_playback(handle, &frames, buffer);
 		
-		if (ret == -EPIPE) {
-			/* EPIPE means underrun */
-			fprintf(stderr, "underrun occurred \n");
-			snd_pcm_prepare(handle);
-		} else if (ret < 0) {
-			fprintf(stderr,
-				"error from writei: %s \n",
-				snd_strerror(ret));
-		} else if (ret != (int)frames) {
-			fprintf(stderr,
-				"short write: written %d frames \n",
-				ret);
-		}
 	}
-	snd_pcm_drain(handle);
-	snd_pcm_close(handle);
+
+	ret = 0;
+
+failure:
+	voip_end_pcm(handle);
 	free(buffer);
 
-	return 0;			
+	return ret;	
 }
 
 	
