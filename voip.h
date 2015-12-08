@@ -2,9 +2,16 @@
 #define __voip_h__
 
 #include <alsa/asoundlib.h>
+#include <arpa/inet.h>
 
 /* Use the newer ALSA API */
 #define ALSA_PCM_NEW_HW_PARAMS_API
+
+struct connection_data {
+        struct sockaddr_in own;
+        struct sockaddr_in other;
+        int sockfd;
+};
 
 int voip_init_pcm(snd_pcm_t **handle, snd_pcm_hw_params_t **params,
 		  snd_pcm_uframes_t *frames, unsigned int *rate);
