@@ -5,6 +5,7 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include "voip.h"
 
 /* Enable debugging */
 #define DEBUG
@@ -24,9 +25,56 @@ void *send_audio(void *arg)
         pthread_exit(NULL);
 }
 
-void *receive_audio(void *arg)
+void *receive_audio(void *data)
 {
+	struct sockaddr_in other = *((struct sockaddr_in *)data);
+	char buffer[BUFLEN];
+	int sockfd; /* Descriptor for UDP socket */
 	/* receive data from socket, add to buffer */
+	int addrlen = sizeof other;
+	int rc;
+	
+	if ((sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
+		fprintf(stderr, "Unable to create UDP socket \n");
+		goto rcv_audio_end;
+	} 
+
+	/* Check UDP connection state by sending AUDIO_RQST to other side */
+	dbg("Checking UDP connection status");
+	memset(buffer, 0, sizeof buffer);
+	sprintf(buffer, "AUDIO_RQST");
+	if ((sendto(sockfd, buffer, sizeof buffer, 0,
+		(struct sockaddr *)&other, addrlen)) < 0) {
+		fprintf(stderr, "Unable to send AUDIO_RQST \n");
+		goto rcv_sock_close;
+	} else {
+		dbg("AUDIO_RQST sent, waiting for response");
+		memset(buffer, 0, sizeof buffer);
+		if ( recvfrom(sockfd, buffer, sizeof buffer, 0,
+				(struct sockaddr *)&other, &addrlen) < 0) {
+			fprintf(stderr,
+				"Unable to receive response: %s \n", 
+				strerror(errno));
+                	goto rcv_sock_close;
+		} else {
+			printf("Received %s from other side \n", buffer);
+			if (!strncmp("ACK", buffer, strlen(buffer))) {
+				dbg("ACK received from other side");
+			} else {
+				fprintf(stderr, "Unknown response \n");
+				goto rcv_sock_close;
+			}
+		}
+	}
+	while(1) {
+		dbg("Audio reception started");
+		break;
+	}
+
+rcv_sock_close:
+	close(sockfd);	
+
+rcv_audio_end:
         pthread_exit(NULL);
 }
 
@@ -37,9 +85,11 @@ void *play_audio(void *arg)
 }
 
 /* handler for maintaining call */
-void *connection_handler(void *socket_fd)
+void *connection_handler(void *data)
 {
-	int sockfd = *((int *)socket_fd);
+	struct connection_data conn = *((struct connection_data *)data);
+	struct sockaddr_in other = conn.other;
+	int sockfd = conn.sockfd;
 	int rc;
 	pthread_t sender, receiver, playback;
 
@@ -54,7 +104,7 @@ void *connection_handler(void *socket_fd)
         /* instantiate receiver thread */
 	dbg("Creating a receiver thread");
 	
-	if (rc = pthread_create(&receiver, NULL, receive_audio, NULL)) {
+	if (rc = pthread_create(&receiver, NULL, receive_audio, &other)) {
 		fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
 		goto failure;
 	}
@@ -103,7 +153,7 @@ int main (int argc, char *argv[])
 	int sockfd;
 	char *server_ip;
 	char buffer[BUFLEN];
-
+	struct connection_data conn;
 	/* Threads for sending, receiving and playback */
 	pthread_t call;
 
@@ -139,6 +189,8 @@ int main (int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 	
+	conn.other = server;
+	
 	dbg("Trying to connect to server");
 	printf("Trying to connect %s \n", server_ip);
 	if (connect(sockfd, (struct sockaddr *)&server, sizeof(server)) < 0) {
@@ -148,6 +200,7 @@ int main (int argc, char *argv[])
 	}
 	
 	printf("Connection established with server %s\n", server_ip);
+	conn.sockfd = sockfd;
 	dbg("Trying to make call");
 
 	memset(buffer, 0, sizeof buffer);
@@ -167,6 +220,14 @@ int main (int argc, char *argv[])
 	}
 
 	printf("The return code: %s \n", buffer);
+
+	if (!strncmp("OK", buffer, strlen(buffer))) {
+		/* Other side returned OK */
+		dbg("Call established");
+		/* Instantiate a connection_handler thread to
+         	 * handle call */
+        	pthread_create(&call, NULL, connection_handler, &conn);
+	}
 	
 	/* Instantiate a connection_handler thread to
 	 * handle call */
