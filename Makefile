@@ -13,10 +13,13 @@ playback: playback.c
 	gcc -g -Wall playback.c -lasound -lvoip -L$(PWD) -o playback
 playback.o: playback.c
 	gcc -c playback.c -lasound
-server: server.c
+server: server.c ring.o
 	gcc server.c -pthread -lvoip -o server -L$(PWD)
 client: client.c
 	gcc client.c -pthread -o client
+
+ring.o: ring.c ring.h
+	gcc -c ring.c
 
 clean:
 	rm -f $(BINS)
