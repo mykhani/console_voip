@@ -14,9 +14,9 @@ playback: playback.c
 playback.o: playback.c
 	gcc -c playback.c -lasound
 server: server.c ring.o
-	gcc server.c -pthread -lvoip -o server -L$(PWD)
-client: client.c
-	gcc client.c -pthread -o client
+	gcc server.c -pthread ring.o -lvoip -o server -L$(PWD)
+client: client.c ring.o
+	gcc client.c -pthread -o client -lvoip ring.o -L$(PWD)
 
 ring.o: ring.c ring.h
 	gcc -c ring.c

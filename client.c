@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include "voip.h"
+#include "ring.h"
 
 /* Enable debugging */
 #define DEBUG
@@ -13,11 +14,33 @@
 #define PORT 8888
 #define BUFLEN 512 /* Max length of buffer, for control data */
 
+#define SAMPLES_PER_PERIOD 128
 #ifdef DEBUG
 #define dbg(x) fprintf(stdout, x ":%s:%d \n", __FILE__, __LINE__)
 #else
 #define dbg(x) {} 
 #endif
+
+/* declare a ring buffer for RX i.e. rbuff
+ * receive_audio thread reads socket and write to rbuff
+ * play_audio thread reads rbuff and passes data to audio device
+ */
+struct ring *rbuff;
+
+/* declare a ring buffer for TX i.e. sbuff
+ * capture_audio thread reads audio device and write to sbuff
+ * send_audio thread reads sbuff and write data to UDP socket
+ */
+struct ring *sbuff;
+
+/* pthread variable relevant for TX */
+pthread_mutex_t tx_lock; // synchronize access to TX ring
+pthread_cond_t capture_done, transmit_done;
+
+/* pthread variable relevant for RX */
+pthread_mutex_t rx_lock; // synchronize access to RX ring
+pthread_cond_t receive_done, playback_done;
+
 
 void *send_audio(void *arg)
 {
@@ -68,7 +91,21 @@ void *receive_audio(void *data)
 	}
 	while(1) {
 		dbg("Audio reception started");
-		break;
+		memset(buffer, 0, sizeof buffer);
+		if ( recvfrom(sockfd, buffer, sizeof buffer, 0,
+				(struct sockaddr *)&other, &addrlen) < 0) {
+			fprintf(stderr,
+				"Unable to receive audio data: %s \n",
+				strerror(errno));
+			goto rcv_sock_close;
+		}
+		pthread_mutex_lock(&rx_lock);
+		while (ring_write(rbuff, buffer, sizeof buffer) < 0 ) {
+			pthread_cond_wait(&playback_done, &rx_lock);
+		}
+		/* signal the reception of data for playback thread */
+		pthread_cond_signal(&receive_done);
+		pthread_mutex_unlock(&rx_lock);
 	}
 
 rcv_sock_close:
@@ -80,7 +117,60 @@ rcv_audio_end:
 
 void *play_audio(void *arg)
 {
+	int ret;
+        unsigned int rate = 8000;
+        int size;
+        char *buffer;
+	int fd;
+
+        snd_pcm_t *handle;
+        snd_pcm_hw_params_t *params;
+        snd_pcm_uframes_t frames = SAMPLES_PER_PERIOD;
+
+        printf("rate is =%d \n", rate);
+
+        voip_init_pcm(&handle, &params, &frames, &rate);
+        printf("In playback main \n");
+        printf("Pointer address to handle=%p \n", &handle);
+        printf("Pointer to handle=%p \n", handle);
+        printf("Pointer to params=%p \n", params);
+        buffer = voip_alloc_buf(params, &frames, &size);
+
+	if (!buffer) {
+                fprintf(stderr, "Unable to allocate buffer: %s \n", strerror(errno));
+                ret = -ENOMEM;
+                goto failure;
+        }
+
+        while(1) {
+
+		pthread_mutex_lock(&rx_lock);
+		while ((ret = ring_read(rbuff, buffer, size)) < 0) {
+			pthread_cond_wait(&receive_done, &rx_lock);
+
+		}
+
+		/* signal the read of audio sample by playback thread */
+		pthread_cond_signal(&playback_done);
+		pthread_mutex_unlock(&rx_lock);
+
+                if ( ret != size) {
+                        fprintf(stderr,
+                                "short read: read %d bytes \n", ret);
+                }
+                /* write frames in one period to device */
+                ret = voip_playback(handle, &frames, buffer);
+
+        }
+
+        ret = 0;
+
+failure:
+        voip_end_pcm(handle);
+        free(buffer);
+
 	/* Send the data from buffer to audio device */
+	
         pthread_exit(NULL);
 }
 
@@ -166,13 +256,35 @@ int main (int argc, char *argv[])
 	
 	server_ip = argv[1];
 	
+	dbg("Creating RX ring buffer");
+	if (ring_alloc(&rbuff, 512 * 512)) {
+		fprintf(stderr, "Unable to allocate RX ring: %s \n",
+			strerror(errno));
+		return EXIT_FAILURE;
+	}
+	ring_init(rbuff);
+
+	printf("Created RX ring of size %d \n", ring_size(rbuff));
+
+	dbg("Creating TX ring buffer");
+        if (ring_alloc(&sbuff, 512 * 512)) {
+                fprintf(stderr, "Unable to allocated TX ring: %s \n",
+                        strerror(errno));
+                return EXIT_FAILURE;
+        }
+        ring_init(sbuff);
+	printf("Created TX ring of size %d \n", ring_size(sbuff));
+
 	dbg("Creating control socket");
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd < 0) {
 		fprintf(stderr, "Unable to create socket\n");
 		return EXIT_FAILURE;
 	}
-	
+
+	pthread_mutex_init(&rx_lock, NULL);
+	pthread_mutex_init(&tx_lock, NULL);
+
 	dbg("Control socket created");
 	
 	/* zeroize sockaddr_in structure for server*/
@@ -229,10 +341,6 @@ int main (int argc, char *argv[])
         	pthread_create(&call, NULL, connection_handler, &conn);
 	}
 	
-	/* Instantiate a connection_handler thread to
-	 * handle call */
-	pthread_create(&call, NULL, connection_handler, &sockfd);
-	/* wait for call to finish before accepting another call */
 	printf("Call in progress\n");
 	pthread_join(call, NULL);
 

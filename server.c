@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include "voip.h"
+#include "ring.h"
 
 /* Enable debugging */
 #define DEBUG
@@ -21,6 +22,31 @@
 #define dbg(x) {} 
 #endif
 
+/* declare a ring buffer for RX i.e. rbuff
+ * receive_audio thread reads socket and write to rbuff
+ * play_audio thread reads rbuff and passes data to audio device
+ */
+struct ring *rbuff;
+
+/* declare a ring buffer for TX i.e. sbuff
+ * capture_audio thread reads audio device and write to sbuff
+ * send_audio thread reads sbuff and write data to UDP socket
+ */
+struct ring *sbuff;
+
+/* pthread variable relevant for TX */
+pthread_mutex_t tx_lock; // synchronize access to TX ring
+pthread_cond_t capture_done, transmit_done;
+
+/* pthread variable relevant for RX */
+pthread_mutex_t rx_lock; // synchronize access to RX ring
+pthread_cond_t receive_done, playback_done;
+
+/* TODO: Move UDP socket creation to connection handler thread
+ * Faced a bug when capture thread executed before send_audio
+ * thread had established UDP socket and as a result, server
+ * lost AUDIO_RQST from client 
+ */
 void *send_audio(void *data)
 {
         /* send data over the UDP socket */
@@ -78,15 +104,27 @@ void *send_audio(void *data)
 
 	while(1) {
 		/* send data here */
+		/* TODO: How to end the send? */
 		dbg("Sending audio data to other side \n");
 		memset(buffer, 0, sizeof buffer);
+		
+		pthread_mutex_lock(&tx_lock);
+		/* if read is unsuccessful, wait for capture thread
+		 * to write audio data to sbuff */
+		while (ring_read(sbuff, buffer, sizeof buffer) < 0) {
+			pthread_cond_wait(&capture_done,&tx_lock); 
+		}
+		/* signal the read complete, capture thread maybe waiting
+		 * on it */
+		pthread_cond_signal(&transmit_done);
+		pthread_mutex_unlock(&tx_lock);
+
 		if (sendto(sockfd, buffer, sizeof buffer, 0, 
 			(struct sockaddr *)&other, addrlen) < 0) {
 			fprintf(stderr,
 				"Unable to send data to other side \n");
 			break;
 		}
-		break;
 	}
 	
 	
@@ -106,9 +144,132 @@ audio_end:
         pthread_exit(NULL);
 }
 
-void *receive_audio(void *arg)
+void *capture_audio(void *data)
+{
+	/* This thread captures audio samples from audio device */
+	/* A placeholder code, atm reading from file to simulate
+	 * captured data */
+	int fd;
+	int rc;
+	char buffer[512];
+	
+	fd = open("/home/ykhan/dev/c_learning/voip_console/audio_samples/test.wav", 'r');
+	
+	if (fd < 0) {
+		fprintf(stderr, "Unable to open audio file \n");
+		goto capture_end;
+	}
+
+	while (1) {
+		rc = read(fd, buffer, 512);
+		if (rc < 0) {
+			fprintf(stderr, "Error reading file \n");
+			close(fd);
+			goto capture_end;
+		} else if (rc == 0) {
+                        printf("EOF reached \n");
+                        close(fd);
+                        break;
+                } else if (rc !=512) {
+
+			printf("Short read, read %d bytes \n", rc);
+		}
+
+		pthread_mutex_lock(&tx_lock);
+		while(ring_write(sbuff, buffer, rc) < 0) {
+			pthread_cond_wait(&transmit_done, &tx_lock);
+		}
+		pthread_cond_signal(&capture_done);
+		pthread_mutex_unlock(&tx_lock);
+			
+	}
+
+capture_end:
+	pthread_exit(NULL);
+
+}
+
+void *receive_audio(void *data)
 {
 	/* receive data from socket, add to buffer */
+	struct connection_data conn = *((struct connection_data *)data);
+        int sockfd;
+        struct sockaddr_in other, own;
+        char buffer[BUFLEN];
+        int addrlen;
+        int rc;
+
+        dbg("Preparing to send audio over UDP socket");
+
+        own = conn.own;
+        other = conn.other;
+
+        if ((sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
+                fprintf(stderr, "Unable to create socket: %s \n", strerror(errno));
+                goto rcv_audio_end;
+        }
+
+        if (bind(sockfd, (struct sockaddr *)&own, sizeof own) < 0) {
+                fprintf(stderr, "Unable to bind socket: %s \n", strerror(errno));
+                goto rcv_audio_end;
+        }
+
+        addrlen = sizeof other;
+
+        /* Wait for audio request from other side.
+         * This is to verify that UDP connection is successful */
+
+        /* Check UDP connection state by sending AUDIO_RQST to other side */
+        dbg("Checking UDP connection status");
+        memset(buffer, 0, sizeof buffer);
+        sprintf(buffer, "AUDIO_RQST");
+        if ((sendto(sockfd, buffer, sizeof buffer, 0,
+                (struct sockaddr *)&other, addrlen)) < 0) {
+                fprintf(stderr, "Unable to send AUDIO_RQST \n");
+                goto rcv_sock_close;
+        } else {
+                dbg("AUDIO_RQST sent, waiting for response");
+                memset(buffer, 0, sizeof buffer);
+                if ( recvfrom(sockfd, buffer, sizeof buffer, 0,
+                                (struct sockaddr *)&other, &addrlen) < 0) {
+                        fprintf(stderr,
+                                "Unable to receive response: %s \n",
+                                strerror(errno));
+                        goto rcv_sock_close;
+	} else {
+                        printf("Received %s from other side \n", buffer);
+                        if (!strncmp("ACK", buffer, strlen(buffer))) {
+                                dbg("ACK received from other side");
+                        } else {
+                                fprintf(stderr, "Unknown response \n");
+                                goto rcv_sock_close;
+                        }
+                }
+        }
+        while(1) {
+                dbg("Audio reception started");
+		memset(buffer, 0, sizeof buffer);
+		if ( recvfrom(sockfd, buffer, sizeof buffer, 0,
+				(struct sockaddr *)&other, &addrlen) < 0) {
+			fprintf(stderr,
+				"Unable to receive audio data: %s \n",
+				strerror(errno));
+			goto rcv_sock_close;
+		}
+		pthread_mutex_lock(&rx_lock);
+		while (ring_write(rbuff, buffer, sizeof buffer) < 0 ) {
+			pthread_cond_wait(&playback_done, &rx_lock);
+		}
+		/* signal the reception of data for playback thread */
+		pthread_cond_signal(&receive_done);
+		pthread_mutex_unlock(&rx_lock);
+		
+	}
+
+rcv_sock_close:
+        close(sockfd);
+
+rcv_audio_end:
         pthread_exit(NULL);
 }
 
@@ -139,18 +300,19 @@ void *play_audio(void *arg)
                 goto failure;
         }
 
-	fd = open("/home/ykhan/dev/c_learning/voip_console/audio_samples/test.wav", 'r');
-	if (!fd) {
-		fprintf(stderr, "Unable to open audio file \n");
-		goto failure;
-	}
-
         while(1) {
-                ret = read(fd, buffer, size); /* read from stdin */
-                if (ret == 0) {
-                        fprintf(stderr, "end of file on input \n");
-                        break;
-                } else if ( ret != size) {
+
+		pthread_mutex_lock(&rx_lock);
+		while ((ret = ring_read(rbuff, buffer, size)) < 0) {
+			pthread_cond_wait(&receive_done, &rx_lock);
+
+		}
+
+		/* signal the read of audio sample by playback thread */
+		pthread_cond_signal(&playback_done);
+		pthread_mutex_unlock(&rx_lock);
+
+                if ( ret != size) {
                         fprintf(stderr,
                                 "short read: read %d bytes \n", ret);
                 }
@@ -173,7 +335,7 @@ failure:
 /* handler for maintaining call */
 void *connection_handler(void *data)
 {
-	pthread_t sender, receiver, playback;
+	pthread_t sender, receiver, playback, capture;
 	struct connection_data conn = *((struct connection_data *)data);
 	struct sockaddr_in other = conn.other;
 	int sockfd = conn.sockfd;
@@ -235,10 +397,18 @@ void *connection_handler(void *data)
                 goto end;
         }
 
+	/* instantiate audio capture thread */
+        dbg("Creating a capture thread");
+
+	if (rc = pthread_create(&capture, NULL, capture_audio, NULL)) {
+                fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
+                goto end;
+        }
+#if 0
         /* instantiate receiver thread */
 	dbg("Creating a receiver thread");
 	
-	if (rc = pthread_create(&receiver, NULL, receive_audio, NULL)) {
+	if (rc = pthread_create(&receiver, NULL, receive_audio, &conn)) {
 		fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
 		goto end;
 	}
@@ -250,10 +420,11 @@ void *connection_handler(void *data)
 		fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
 		goto end;
 	}
-	
+#endif
 	dbg("Connection_handler waiting");
         /* wait for threads to finish their jobs */
         pthread_join(sender, NULL);
+        pthread_join(capture, NULL);
         pthread_join(receiver, NULL);
         pthread_join(playback, NULL);
 	
@@ -293,10 +464,28 @@ int main (int argc, char *argv[])
 	int addrlen;	
 	int sockfd, newsockfd;
 	struct connection_data conn;
+	int rc;
 	/* Threads for sending, receiving and playback */
 	pthread_t call;
 
-	int rc;
+	dbg("Creating RX ring buffer");
+	if (ring_alloc(&rbuff, 512 * 512)) {
+		fprintf(stderr, "Unable to allocate RX ring: %s \n",
+			strerror(errno));
+		return EXIT_FAILURE;
+	}
+	ring_init(rbuff);
+
+	printf("Created RX ring of size %d \n", ring_size(rbuff));
+
+	dbg("Creating TX ring buffer");
+        if (ring_alloc(&sbuff, 512 * 512)) {
+                fprintf(stderr, "Unable to allocated TX ring: %s \n",
+                        strerror(errno));
+                return EXIT_FAILURE;
+        }
+        ring_init(sbuff);
+	printf("Created TX ring of size %d \n", ring_size(sbuff));
 
 	dbg("Creating control socket");
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -304,7 +493,10 @@ int main (int argc, char *argv[])
 		fprintf(stderr, "Unable to create socket\n");
 		return EXIT_FAILURE;
 	}
-	
+
+	pthread_mutex_init(&rx_lock, NULL);
+	pthread_mutex_init(&tx_lock, NULL);
+
 	dbg("Control socket created");
 
 	/* populate sockaddr_in structure for server */
