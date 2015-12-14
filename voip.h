@@ -7,19 +7,28 @@
 /* Use the newer ALSA API */
 #define ALSA_PCM_NEW_HW_PARAMS_API
 
+enum {
+	PLAYBACK,
+	RECORD
+};
+
 struct connection_data {
         struct sockaddr_in own;
         struct sockaddr_in other;
         int sockfd;
+	int udp_sock;
 };
 
 int voip_init_pcm(snd_pcm_t **handle, snd_pcm_hw_params_t **params,
-		  snd_pcm_uframes_t *frames, unsigned int *rate);
+		  snd_pcm_uframes_t *frames, unsigned int *rate, int mode);
 
 char *voip_alloc_buf(snd_pcm_hw_params_t *params,
 			snd_pcm_uframes_t *frames, int *size);
 
 int voip_playback(snd_pcm_t *handle, snd_pcm_uframes_t *frames,
+		 char *buffer);
+
+int voip_record(snd_pcm_t *handle, snd_pcm_uframes_t *frames,
 		 char *buffer);
 
 void voip_end_pcm(snd_pcm_t *handle);

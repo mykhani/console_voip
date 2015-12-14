@@ -4,16 +4,27 @@
 /* Use the newer ALSA API */
 #define ALSA_PCM_NEW_HW_PARAMS_API
 
-int voip_init_pcm(snd_pcm_t **handle, snd_pcm_hw_params_t **params, snd_pcm_uframes_t *frames, unsigned int *rate)
+int voip_init_pcm(snd_pcm_t **handle, snd_pcm_hw_params_t **params, snd_pcm_uframes_t *frames, unsigned int *rate, int mode)
 {
 	int ret;
 
 	printf("Pointer address to handle=%p \n", handle);
 	printf("Pointer to handle=%p \n", *handle);
-
-	/* open PCM device for playback */
-	ret = snd_pcm_open(handle, "plughw",
-	                SND_PCM_STREAM_PLAYBACK, 0 );
+	printf("Mode specified : %d \n", mode);
+	/* open PCM device for playback/capture */
+	switch (mode) {
+	case PLAYBACK:
+		ret = snd_pcm_open(handle, "plughw",
+                        SND_PCM_STREAM_PLAYBACK, 0 );
+		break;
+	case RECORD: 
+		ret = snd_pcm_open(handle, "plughw",
+                        SND_PCM_STREAM_CAPTURE, 0 );
+		break;
+	default: 
+		fprintf(stderr, "Invalid mode specified \n");
+		return -EINVAL;
+	}
 	printf("Pointer address to handle=%p \n", handle);
 	printf("Pointer to handle=%p \n", *handle);
 	if (ret < 0) {
@@ -74,6 +85,17 @@ int voip_init_pcm(snd_pcm_t **handle, snd_pcm_hw_params_t **params, snd_pcm_ufra
 		return ret;
 	}
 
+//	snd_pcm_hw_params_free(*params);
+
+	if (mode == RECORD) {
+		ret = snd_pcm_prepare(*handle);
+		if (ret < 0) {
+			fprintf(stderr,
+				"Cannot prepare audio interface for capture \n");
+			return ret;
+		}
+	}
+
 	return 0;
 }
 
@@ -119,6 +141,30 @@ int voip_playback(snd_pcm_t *handle, snd_pcm_uframes_t *frames, char *buffer)
 	return ret;
 
 }
+
+int voip_record(snd_pcm_t *handle, snd_pcm_uframes_t *frames, char *buffer)
+{
+        int ret;
+        /* read frames in one period to device */
+        ret = snd_pcm_readi(handle, buffer, *frames);
+
+        if (ret == -EPIPE) {
+                /* EPIPE means underrun */
+                fprintf(stderr, "underrun occurred \n");
+                snd_pcm_prepare(handle);
+        } else if (ret < 0) {
+                fprintf(stderr,
+                        "error from writei: %s \n",
+                        snd_strerror(ret));
+        } else if (ret != (int)*frames) {
+                fprintf(stderr,
+                        "short read: read %d frames \n",
+                        ret);
+        }
+        return ret;
+
+}
+
 
 void voip_end_pcm(snd_pcm_t *handle)
 {

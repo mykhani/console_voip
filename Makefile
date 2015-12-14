@@ -1,4 +1,4 @@
-BINS = encode decode playback server client
+BINS = encode decode playback record server client
 LIBS = libvoip.so
 
 all : $(LIBS) $(BINS)
@@ -11,6 +11,8 @@ decode: decode.c
 	gcc decode.c -L/usr/local/lib -lspeex -o decode
 playback: playback.c 
 	gcc -g -Wall playback.c -lasound -lvoip -L$(PWD) -o playback
+record: record.c 
+	gcc -g -Wall record.c -lasound -lvoip -L$(PWD) -o record
 playback.o: playback.c
 	gcc -c playback.c -lasound
 server: server.c ring.o
