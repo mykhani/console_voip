@@ -23,7 +23,7 @@ int main(int argc, char *argv[])
 	
         printf("rate is =%d \n", rate);
 
-	voip_init_pcm(&handle, &params, &frames, &rate);
+	voip_init_pcm(&handle, &params, &frames, &rate, PLAYBACK);
 	printf("In playback main \n");
 	printf("Pointer address to handle=%p \n", &handle);
         printf("Pointer to handle=%p \n", handle);
