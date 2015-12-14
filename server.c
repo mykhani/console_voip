@@ -14,7 +14,7 @@
 #define PORT 8888
 #define BUFLEN 512 /* Max length of buffer */
 
-#define SAMPLES_PER_PERIOD 128
+#define SAMPLES_PER_PERIOD 1000
 
 #ifdef DEBUG
 #define dbg(x) fprintf(stdout, x ":%s:%d \n", __FILE__, __LINE__)
@@ -51,7 +51,7 @@ void *send_audio(void *data)
 {
         /* send data over the UDP socket */
 	struct connection_data conn = *((struct connection_data *)data);
-	int sockfd;
+	int sockfd = conn.udp_sock;
 	struct sockaddr_in other, own;
 	char buffer[BUFLEN];
 	int addrlen;
@@ -62,16 +62,6 @@ void *send_audio(void *data)
 	own = conn.own;
 	other = conn.other;
 
-	if ((sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
-		fprintf(stderr, "Unable to create socket: %s \n", strerror(errno));
-		goto audio_end;
-	}
-
-	if (bind(sockfd, (struct sockaddr *)&own, sizeof own) < 0) {
-		fprintf(stderr, "Unable to bind socket: %s \n", strerror(errno));
-                goto audio_end;	
-	}
-	
 	addrlen = sizeof other;
 	
 	/* Wait for audio request from other side.
@@ -147,44 +137,51 @@ audio_end:
 void *capture_audio(void *data)
 {
 	/* This thread captures audio samples from audio device */
-	/* A placeholder code, atm reading from file to simulate
-	 * captured data */
-	int fd;
+	/* TODO: add mechanism to end this thread when desired,
+	 * perhaps by passing flags for indicating end of call? */
+	int ret;
 	int rc;
-	char buffer[512];
-	
-	fd = open("/home/ykhan/dev/c_learning/voip_console/audio_samples/test.wav", 'r');
-	
-	if (fd < 0) {
-		fprintf(stderr, "Unable to open audio file \n");
-		goto capture_end;
-	}
+        unsigned int rate = 8000;
+        int size;
+        char *buffer;
+        int fd;
 
-	while (1) {
-		rc = read(fd, buffer, 512);
-		if (rc < 0) {
-			fprintf(stderr, "Error reading file \n");
-			close(fd);
-			goto capture_end;
-		} else if (rc == 0) {
-                        printf("EOF reached \n");
-                        close(fd);
-                        break;
-                } else if (rc !=512) {
+        snd_pcm_t *handle;
+        snd_pcm_hw_params_t *params;
+        snd_pcm_uframes_t frames = SAMPLES_PER_PERIOD;
 
-			printf("Short read, read %d bytes \n", rc);
-		}
+        printf("rate is =%d \n", rate);
 
+        ret = voip_init_pcm(&handle, &params, &frames, &rate, RECORD);
+	if (ret) {
+                fprintf(stderr, "Unable to initialize PCM \n");
+                goto capture_failure;
+        }
+        printf("In record main \n");
+        printf("Pointer address to handle=%p \n", &handle);
+        printf("Pointer to handle=%p \n", handle);
+        printf("Pointer to params=%p \n", params);
+        buffer = voip_alloc_buf(params, &frames, &size);
+	if (!buffer) {
+                fprintf(stderr, "Unable to allocate buffer: %s \n", strerror(errno));
+                ret = -ENOMEM;
+                goto capture_failure;
+        }
+	while(1) {
+                rc = voip_record(handle, &frames, buffer);
 		pthread_mutex_lock(&tx_lock);
-		while(ring_write(sbuff, buffer, rc) < 0) {
-			pthread_cond_wait(&transmit_done, &tx_lock);
-		}
+                while(ring_write(sbuff, buffer, rc) < 0) {
+                        pthread_cond_wait(&transmit_done, &tx_lock);
+                }
 		pthread_cond_signal(&capture_done);
-		pthread_mutex_unlock(&tx_lock);
-			
-	}
+                pthread_mutex_unlock(&tx_lock);
+        }
+	ret = 0;
 
 capture_end:
+        free(buffer);
+        voip_end_pcm(handle);
+capture_failure:
 	pthread_exit(NULL);
 
 }
@@ -193,7 +190,7 @@ void *receive_audio(void *data)
 {
 	/* receive data from socket, add to buffer */
 	struct connection_data conn = *((struct connection_data *)data);
-        int sockfd;
+        int sockfd = conn.udp_sock;
         struct sockaddr_in other, own;
         char buffer[BUFLEN];
         int addrlen;
@@ -203,16 +200,6 @@ void *receive_audio(void *data)
 
         own = conn.own;
         other = conn.other;
-
-        if ((sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
-                fprintf(stderr, "Unable to create socket: %s \n", strerror(errno));
-                goto rcv_audio_end;
-        }
-
-        if (bind(sockfd, (struct sockaddr *)&own, sizeof own) < 0) {
-                fprintf(stderr, "Unable to bind socket: %s \n", strerror(errno));
-                goto rcv_audio_end;
-        }
 
         addrlen = sizeof other;
 
@@ -287,7 +274,7 @@ void *play_audio(void *arg)
 
         printf("rate is =%d \n", rate);
 
-        voip_init_pcm(&handle, &params, &frames, &rate);
+        voip_init_pcm(&handle, &params, &frames, &rate, PLAYBACK);
         printf("In playback main \n");
         printf("Pointer address to handle=%p \n", &handle);
         printf("Pointer to handle=%p \n", handle);
@@ -337,8 +324,10 @@ void *connection_handler(void *data)
 {
 	pthread_t sender, receiver, playback, capture;
 	struct connection_data conn = *((struct connection_data *)data);
+	struct sockaddr_in own = conn.own;
 	struct sockaddr_in other = conn.other;
 	int sockfd = conn.sockfd;
+	int udp_sock;
 
 	char ipstr[INET_ADDRSTRLEN]; /* holds the client ip address */
 	char buffer[BUFLEN];
@@ -391,6 +380,18 @@ void *connection_handler(void *data)
 		fprintf(stderr, "Connection terminated with client \n");
 		goto end;
 	}
+
+	if ((udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
+                fprintf(stderr, "Unable to create TX UDP socket: %s \n", strerror(errno));
+                goto end;
+        }
+
+        if (bind(udp_sock, (struct sockaddr *)&own, sizeof own) < 0) {
+                fprintf(stderr, "Unable to bind TX UDP socket: %s \n", strerror(errno));
+                goto end;
+        }
+
+	conn.udp_sock = udp_sock;
 
         if (rc = pthread_create(&sender, NULL, send_audio, &conn)) {
                 fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
@@ -469,7 +470,7 @@ int main (int argc, char *argv[])
 	pthread_t call;
 
 	dbg("Creating RX ring buffer");
-	if (ring_alloc(&rbuff, 512 * 512)) {
+	if (ring_alloc(&rbuff, SAMPLES_PER_PERIOD *4 * 512)) {
 		fprintf(stderr, "Unable to allocate RX ring: %s \n",
 			strerror(errno));
 		return EXIT_FAILURE;
