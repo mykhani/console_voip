@@ -14,7 +14,7 @@
 #define PORT 8888
 #define BUFLEN 512 /* Max length of buffer, for control data */
 
-#define SAMPLES_PER_PERIOD 128
+#define SAMPLES_PER_PERIOD 1000
 #ifdef DEBUG
 #define dbg(x) fprintf(stdout, x ":%s:%d \n", __FILE__, __LINE__)
 #else
@@ -129,7 +129,7 @@ void *play_audio(void *arg)
 
         printf("rate is =%d \n", rate);
 
-        voip_init_pcm(&handle, &params, &frames, &rate);
+        voip_init_pcm(&handle, &params, &frames, &rate, PLAYBACK);
         printf("In playback main \n");
         printf("Pointer address to handle=%p \n", &handle);
         printf("Pointer to handle=%p \n", handle);
@@ -257,7 +257,7 @@ int main (int argc, char *argv[])
 	server_ip = argv[1];
 	
 	dbg("Creating RX ring buffer");
-	if (ring_alloc(&rbuff, 512 * 512)) {
+	if (ring_alloc(&rbuff, SAMPLES_PER_PERIOD * 4 * 512)) {
 		fprintf(stderr, "Unable to allocate RX ring: %s \n",
 			strerror(errno));
 		return EXIT_FAILURE;
