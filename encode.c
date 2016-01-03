@@ -15,7 +15,7 @@ int main(int argc, char *argv[])
 	SpeexBits bits;
 	void *state; /* For holding encoder state */
 	int quality;
-	char bytes[200];
+	char bytes[FRAME_SIZE];
 	int nbytes = 0; /* stores total number of bytes */
 	int tmp;
 
@@ -58,6 +58,8 @@ int main(int argc, char *argv[])
 		speex_encode_int(state, samples, &bits);
 		/* Write the encoded bits to array of bytes so that they can be written */
 		nbytes = speex_bits_write(&bits, bytes, 200);
+
+		printf("Number of bytes compressed: %d \n", nbytes);
 	
 		/* Write the size of encoded frame first */
 		fwrite(&nbytes, sizeof(int), 1, fout);
