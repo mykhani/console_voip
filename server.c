@@ -69,7 +69,7 @@ void *send_audio(void *data)
         SpeexBits bits;
         void *state; /* For holding encoder state */
         int quality;
-	int nbytes;
+	int nbytes, count;
 
         dbg("Preparing speex for compression");
 
@@ -120,33 +120,44 @@ void *send_audio(void *data)
 		/* TODO: How to end the send? */
 		//dbg("Sending audio data to other side \n");
 		memset(compressed, 0, sizeof compressed);
-		
-		pthread_mutex_lock(&tx_lock);
-		/* if read is unsuccessful, wait for capture thread
-		 * to write audio data to sbuff */
-		printf("Trying data send\n");
-		while ((rc = ring_read(sbuff, (char *)audio_samples, sizeof audio_samples)) < 0) {
-			pthread_cond_wait(&capture_done,&tx_lock);
+		memset(buffer, 0, sizeof buffer);
+                printf("Trying data send\n");
+		/* Instead of multiple sends over socket, compress the complete audio buffer size
+		 * of data, each encoding results in 38 bytes, so a 512 bytes transmit buffer
+		 * can accomodate over 512 / 38 ~ 13 160 bytes speex frames. We are sending only
+		 * 5 (i.e 800 / 160) speex frames for our audio buffer of 800 frames */
+		for (i = 0, count = 0; i < 5; i++) {
+			pthread_mutex_lock(&tx_lock);
+                	/* if read is unsuccessful, wait for capture thread
+                 	* to write audio data to sbuff */
+                	while ((rc = ring_read(sbuff, (char *)audio_samples, sizeof audio_samples)) < 0) {
+                        	pthread_cond_wait(&capture_done,&tx_lock);
+                	}
+                	/* signal the read complete, capture thread maybe waiting
+                 	* on it */
+			pthread_cond_signal(&transmit_done);
+			pthread_mutex_unlock(&tx_lock);
+			printf("Read %d bytes from tx circular buffer \n", rc);	
+			speex_bits_reset(&bits);
+			/* Encode here */
+			speex_encode_int(state, audio_samples, &bits);
+			/* Write the encoded bits to array of bytes so that they can be written */
+			nbytes = speex_bits_write(&bits, compressed, sizeof compressed);
+
+			memcpy(buffer + i * 38, compressed, nbytes);
+			count += nbytes;
+			//printf("Size of compressed data: %d \n", nbytes);
+			//printf("Size of audio_samples: %d \n", sizeof audio_samples);
+			//printf("Iteration no : %d \n", i + 1);
 		}
-		/* signal the read complete, capture thread maybe waiting
-		 * on it */
-		pthread_cond_signal(&transmit_done);
-		pthread_mutex_unlock(&tx_lock);
-		//printf("Read %d bytes from tx circular buffer \n", rc);	
-		speex_bits_reset(&bits);
-		/* Encode here */
-		speex_encode_int(state, audio_samples, &bits);
-		/* Write the encoded bits to array of bytes so that they can be written */
-		nbytes = speex_bits_write(&bits, compressed, sizeof compressed);
-		//printf("Size of compressed data: %d \n", nbytes);
-		//printf("Size of audio_samples: %d \n", sizeof audio_samples);
-		//printf("Iteration no : %d \n", i + 1);
 		
-		if (sendto(sockfd, compressed, nbytes, 0, (struct sockaddr *)&other, addrlen) < 0) {
+		if (sendto(sockfd, buffer, count, 0, (struct sockaddr *)&other, addrlen) < 0) {
 			fprintf(stderr,
 		        	"Unable to send data to other side \n");
 			break;
-		}
+		} else 
+                	printf("Data sent: %d bytes\n", count);
+		
 	
 	}
 
@@ -214,7 +225,7 @@ void *capture_audio(void *data)
 	while(1) {
                 rc = voip_capture(handle, buffer_size / frame_size, audio_samples);
 #if 0	
-		rc = read(fd, buffer, buffer_size);
+		rc = read(fd, audio_samples, sizeof audio_samples);
 	
 		if (rc == 0) {
 			printf("EOF reached \n");
@@ -223,11 +234,11 @@ void *capture_audio(void *data)
 			fprintf(stderr, "Error reading file \n");
 			break;
 		}
-#endif	
+#endif
 	
-		printf("Read %d bytes from capture source \n", rc);
+		printf("Read %d frames from capture source \n", rc);
 		pthread_mutex_lock(&tx_lock);
-                while(ring_write(sbuff, (char *)audio_samples, rc) < 0) {
+                while(ring_write(sbuff, (char *)audio_samples, sizeof audio_samples )  < 0) {
                         pthread_cond_wait(&transmit_done, &tx_lock);
                 }
 		pthread_cond_signal(&capture_done);

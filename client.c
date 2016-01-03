@@ -66,6 +66,7 @@ void *receive_audio(void *data)
         void *state; /* For holding encoder state */
         int tmp;
 	int nbytes;
+	int i;
 
         dbg("Preparing speex for de-compression");
         state = speex_decoder_init(&speex_nb_mode);
@@ -110,30 +111,35 @@ void *receive_audio(void *data)
 	while(1) {
 		memset(audio_samples, 0, sizeof audio_samples);
 		memset(compressed, 0, sizeof compressed);
-		if ((rc = recvfrom(sockfd, compressed, sizeof compressed, 0,
+		memset(buffer, 0, sizeof buffer);
+		if ((rc = recvfrom(sockfd, buffer, sizeof buffer, 0,
 				(struct sockaddr *)&other, &addrlen)) < 0) {
 			fprintf(stderr,
 				"Unable to receive audio data: %s \n",
 				strerror(errno));
 			goto rcv_sock_close;
 		}
-		//printf("Received %d compressed bytes on UDP socket \n", rc);
+		printf("Received %d compressed bytes on UDP socket \n", rc);
 
-		speex_bits_reset(&bits);
+		for (i = 0; i < 5; i++) {
+			speex_bits_reset(&bits);
+			/* each encoded speex frame takes 38 bytes */
+			memcpy(compressed, buffer + i * 38, 38);
 
-                speex_bits_read_from(&bits, compressed, rc);
+                	speex_bits_read_from(&bits, compressed, 38);
 		
-		/* Decode here */
-                speex_decode_int(state, &bits, audio_samples);	
+			/* Decode here */
+                	speex_decode_int(state, &bits, audio_samples);	
 		
-		pthread_mutex_lock(&rx_lock);
-		while (ring_write(rbuff, (char *)audio_samples, sizeof audio_samples) < 0 ) {
-			pthread_cond_wait(&playback_done, &rx_lock);
+			pthread_mutex_lock(&rx_lock);
+			while (ring_write(rbuff, (char *)audio_samples, sizeof audio_samples) < 0 ) {
+				pthread_cond_wait(&playback_done, &rx_lock);
+			}
+
+			/* signal the reception of data for playback thread */
+			pthread_cond_signal(&receive_done);
+			pthread_mutex_unlock(&rx_lock);
 		}
-
-		/* signal the reception of data for playback thread */
-		pthread_cond_signal(&receive_done);
-		pthread_mutex_unlock(&rx_lock);
 	}
 
 	/* Destroy the encoder state */
