@@ -9,16 +9,16 @@ encode: encode.c
 	gcc encode.c -L/usr/local/lib -lspeex -o encode
 decode: decode.c
 	gcc decode.c -L/usr/local/lib -lspeex -o decode
-playback: playback.c 
-	gcc -g -Wall playback.c -lasound -lvoip -L$(PWD) -o playback
+playback: playback.c  ring.o
+	gcc -g -Wall playback.c ring.o -lasound -lvoip -L$(PWD) -o playback
 record: record.c 
 	gcc -g -Wall record.c -lasound -lvoip -L$(PWD) -o record
 playback.o: playback.c
 	gcc -c playback.c -lasound
 server: server.c ring.o
-	gcc server.c -pthread ring.o -lvoip -o server -L$(PWD)
+	gcc server.c -pthread ring.o -lvoip -lspeex -o server -L$(PWD)
 client: client.c ring.o
-	gcc client.c -pthread -o client -lvoip ring.o -L$(PWD)
+	gcc client.c -pthread -o client -lvoip -lspeex ring.o -L$(PWD)
 
 ring.o: ring.c ring.h
 	gcc -c ring.c
