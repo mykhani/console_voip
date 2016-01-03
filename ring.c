@@ -106,7 +106,7 @@ int ring_read(struct ring *_ring, char *buff, int len)
 	/* TODO: Maybe we shoud have a certain minimum number of bytes
 	 * available istead of just greater than 0 to proceed with read?
 	 */
-	if (!(_ring->count > 0)) {
+	if (_ring->count < len) {
 		dbg("No data. Waiting for data to be produced");
 		return -ENOMEM;
 	}
