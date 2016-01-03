@@ -20,16 +20,16 @@ struct connection_data {
 };
 
 int voip_init_pcm(snd_pcm_t **handle, snd_pcm_hw_params_t **params,
-		  snd_pcm_uframes_t *frames, unsigned int *rate, int mode);
+		  int *buffer_size, unsigned int *rate, int mode);
 
 char *voip_alloc_buf(snd_pcm_hw_params_t *params,
 			snd_pcm_uframes_t *frames, int *size);
 
-int voip_playback(snd_pcm_t *handle, snd_pcm_uframes_t *frames,
-		 char *buffer);
+int voip_playback(snd_pcm_t *handle, snd_pcm_uframes_t frames,
+		 short buffer[]);
 
-int voip_record(snd_pcm_t *handle, snd_pcm_uframes_t *frames,
-		 char *buffer);
+int voip_capture(snd_pcm_t *handle, snd_pcm_uframes_t frames,
+		 short buffer[]);
 
 void voip_end_pcm(snd_pcm_t *handle);
 
