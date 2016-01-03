@@ -5,7 +5,8 @@
 #include <errno.h>
 #include <string.h>
 
-#define FRAME_SIZE 160 /* 160 bytes frame */
+#define FRAME_SIZE 160
+ /* 160 bytes frame */
 
 int main(int argc, char *argv[])
 {
@@ -15,7 +16,7 @@ int main(int argc, char *argv[])
 	SpeexBits bits;
 	void *state; /* For holding encoder state */
 	int quality;
-	char bytes[200];
+	char bytes[FRAME_SIZE];
 	int nbytes = 0; /* stores number of bytes in frame*/
 	int tmp;
 
@@ -53,7 +54,9 @@ int main(int argc, char *argv[])
 		if(feof(fin))
 			break;
 		
-		fread(bytes, sizeof(char), nbytes, fin);		
+		fread(bytes, sizeof(char), nbytes, fin);
+
+		printf("Number of bytes to de-compress: %d \n", nbytes);		
 		
 		speex_bits_reset(&bits);
 
