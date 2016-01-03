@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include "voip.h"
 #include "ring.h"
+#include <speex/speex.h>
 
 /* Enable debugging */
 #define DEBUG
@@ -14,7 +15,11 @@
 #define PORT 8888
 #define BUFLEN 512 /* Max length of buffer */
 
-#define SAMPLES_PER_PERIOD 1000
+/* We want to send 100ms of audio data in each 
+ * UDP transfer. For 8000 sampling rate, 100ms of data means
+ * 0.100 * 8000 ~ 800 samples */
+#define SAMPLES_PER_PERIOD 800 /* frames per perod */
+#define SPEEX_FRAME_SIZE 160
 
 #ifdef DEBUG
 #define dbg(x) fprintf(stdout, x ":%s:%d \n", __FILE__, __LINE__)
@@ -53,9 +58,27 @@ void *send_audio(void *data)
 	struct connection_data conn = *((struct connection_data *)data);
 	int sockfd = conn.udp_sock;
 	struct sockaddr_in other, own;
-	char buffer[BUFLEN];
+	short audio_samples[SPEEX_FRAME_SIZE];
+	char buffer[512];
+	char compressed[SPEEX_FRAME_SIZE];
 	int addrlen;
 	int rc;
+	int i;
+
+	/* variables for speex */
+        SpeexBits bits;
+        void *state; /* For holding encoder state */
+        int quality;
+	int nbytes;
+
+        dbg("Preparing speex for compression");
+
+        state = speex_encoder_init(&speex_nb_mode);
+        /* Set the quality to 8 (15 kbps) */
+        quality = 8;
+        speex_encoder_ctl(state, SPEEX_SET_QUALITY, &quality);
+
+        speex_bits_init(&bits);
 	
 	dbg("Preparing to send audio over UDP socket");
 
@@ -95,27 +118,43 @@ void *send_audio(void *data)
 	while(1) {
 		/* send data here */
 		/* TODO: How to end the send? */
-		dbg("Sending audio data to other side \n");
-		memset(buffer, 0, sizeof buffer);
+		//dbg("Sending audio data to other side \n");
+		memset(compressed, 0, sizeof compressed);
 		
 		pthread_mutex_lock(&tx_lock);
 		/* if read is unsuccessful, wait for capture thread
 		 * to write audio data to sbuff */
-		while (ring_read(sbuff, buffer, sizeof buffer) < 0) {
-			pthread_cond_wait(&capture_done,&tx_lock); 
+		printf("Trying data send\n");
+		while ((rc = ring_read(sbuff, (char *)audio_samples, sizeof audio_samples)) < 0) {
+			pthread_cond_wait(&capture_done,&tx_lock);
 		}
 		/* signal the read complete, capture thread maybe waiting
 		 * on it */
 		pthread_cond_signal(&transmit_done);
 		pthread_mutex_unlock(&tx_lock);
-
-		if (sendto(sockfd, buffer, sizeof buffer, 0, 
-			(struct sockaddr *)&other, addrlen) < 0) {
+		//printf("Read %d bytes from tx circular buffer \n", rc);	
+		speex_bits_reset(&bits);
+		/* Encode here */
+		speex_encode_int(state, audio_samples, &bits);
+		/* Write the encoded bits to array of bytes so that they can be written */
+		nbytes = speex_bits_write(&bits, compressed, sizeof compressed);
+		//printf("Size of compressed data: %d \n", nbytes);
+		//printf("Size of audio_samples: %d \n", sizeof audio_samples);
+		//printf("Iteration no : %d \n", i + 1);
+		
+		if (sendto(sockfd, compressed, nbytes, 0, (struct sockaddr *)&other, addrlen) < 0) {
 			fprintf(stderr,
-				"Unable to send data to other side \n");
+		        	"Unable to send data to other side \n");
 			break;
 		}
+	
 	}
+
+	dbg("Freeing up speex resources");
+	/* Destroy the encoder state */
+        speex_encoder_destroy(state);
+        /* Destroy the bits-packing */
+        speex_bits_destroy(&bits);
 	
 	
 send_sock_close:
@@ -143,16 +182,18 @@ void *capture_audio(void *data)
 	int rc;
         unsigned int rate = 8000;
         int size;
-        char *buffer;
+	short audio_samples[SAMPLES_PER_PERIOD];
         int fd;
+	int frame_size = 2;
 
         snd_pcm_t *handle;
         snd_pcm_hw_params_t *params;
-        snd_pcm_uframes_t frames = SAMPLES_PER_PERIOD;
+	snd_pcm_uframes_t frames;
+        int buffer_size = SAMPLES_PER_PERIOD * sizeof(short);
 
         printf("rate is =%d \n", rate);
 
-        ret = voip_init_pcm(&handle, &params, &frames, &rate, RECORD);
+        ret = voip_init_pcm(&handle, &params, &buffer_size, &rate, RECORD);
 	if (ret) {
                 fprintf(stderr, "Unable to initialize PCM \n");
                 goto capture_failure;
@@ -161,16 +202,32 @@ void *capture_audio(void *data)
         printf("Pointer address to handle=%p \n", &handle);
         printf("Pointer to handle=%p \n", handle);
         printf("Pointer to params=%p \n", params);
-        buffer = voip_alloc_buf(params, &frames, &size);
-	if (!buffer) {
-                fprintf(stderr, "Unable to allocate buffer: %s \n", strerror(errno));
-                ret = -ENOMEM;
-                goto capture_failure;
-        }
+
+	fd = open("/home/ykhan/khan/voipp2/recording", 'r');
+
+	if (fd < 0) {
+		fprintf(stderr, "Error openening file to read: %s \n",
+			strerror(errno));
+		goto capture_failure;
+	}
+	printf("Size of buffer to accomodate period of data : %d \n", buffer_size);
 	while(1) {
-                rc = voip_record(handle, &frames, buffer);
+                rc = voip_capture(handle, buffer_size / frame_size, audio_samples);
+#if 0	
+		rc = read(fd, buffer, buffer_size);
+	
+		if (rc == 0) {
+			printf("EOF reached \n");
+			break;
+		} else if (rc < 0) {
+			fprintf(stderr, "Error reading file \n");
+			break;
+		}
+#endif	
+	
+		printf("Read %d bytes from capture source \n", rc);
 		pthread_mutex_lock(&tx_lock);
-                while(ring_write(sbuff, buffer, rc) < 0) {
+                while(ring_write(sbuff, (char *)audio_samples, rc) < 0) {
                         pthread_cond_wait(&transmit_done, &tx_lock);
                 }
 		pthread_cond_signal(&capture_done);
@@ -179,7 +236,6 @@ void *capture_audio(void *data)
 	ret = 0;
 
 capture_end:
-        free(buffer);
         voip_end_pcm(handle);
 capture_failure:
 	pthread_exit(NULL);
@@ -192,9 +248,24 @@ void *receive_audio(void *data)
 	struct connection_data conn = *((struct connection_data *)data);
         int sockfd = conn.udp_sock;
         struct sockaddr_in other, own;
-        char buffer[BUFLEN];
+        char buffer[SAMPLES_PER_PERIOD * 4];
         int addrlen;
         int rc;
+
+	/* variables for speex */
+	SpeexBits bits;
+        void *state; /* For holding encoder state */
+        int quality;
+	
+	dbg("Preparing speex for compression");
+	state = speex_encoder_init(&speex_nb_mode);
+	/* Set the quality to 8 (15 kbps) */
+        quality = 8;
+        speex_encoder_ctl(state, SPEEX_SET_QUALITY, &quality);
+
+        speex_bits_init(&bits);
+
+	
 
         dbg("Preparing to send audio over UDP socket");
 
@@ -257,65 +328,6 @@ rcv_sock_close:
         close(sockfd);
 
 rcv_audio_end:
-        pthread_exit(NULL);
-}
-
-void *play_audio(void *arg)
-{
-	int ret;
-        unsigned int rate = 8000;
-        int size;
-        char *buffer;
-	int fd;
-
-        snd_pcm_t *handle;
-        snd_pcm_hw_params_t *params;
-        snd_pcm_uframes_t frames = SAMPLES_PER_PERIOD;
-
-        printf("rate is =%d \n", rate);
-
-        voip_init_pcm(&handle, &params, &frames, &rate, PLAYBACK);
-        printf("In playback main \n");
-        printf("Pointer address to handle=%p \n", &handle);
-        printf("Pointer to handle=%p \n", handle);
-        printf("Pointer to params=%p \n", params);
-        buffer = voip_alloc_buf(params, &frames, &size);
-
-	if (!buffer) {
-                fprintf(stderr, "Unable to allocate buffer: %s \n", strerror(errno));
-                ret = -ENOMEM;
-                goto failure;
-        }
-
-        while(1) {
-
-		pthread_mutex_lock(&rx_lock);
-		while ((ret = ring_read(rbuff, buffer, size)) < 0) {
-			pthread_cond_wait(&receive_done, &rx_lock);
-
-		}
-
-		/* signal the read of audio sample by playback thread */
-		pthread_cond_signal(&playback_done);
-		pthread_mutex_unlock(&rx_lock);
-
-                if ( ret != size) {
-                        fprintf(stderr,
-                                "short read: read %d bytes \n", ret);
-                }
-                /* write frames in one period to device */
-                ret = voip_playback(handle, &frames, buffer);
-
-        }
-
-        ret = 0;
-
-failure:
-        voip_end_pcm(handle);
-        free(buffer);
-
-	/* Send the data from buffer to audio device */
-	
         pthread_exit(NULL);
 }
 
@@ -470,6 +482,8 @@ int main (int argc, char *argv[])
 	pthread_t call;
 
 	dbg("Creating RX ring buffer");
+	/* allocate enough space to store 512 periods or 2.56s of audio data
+	 * as each period is of 5ms size */
 	if (ring_alloc(&rbuff, SAMPLES_PER_PERIOD *4 * 512)) {
 		fprintf(stderr, "Unable to allocate RX ring: %s \n",
 			strerror(errno));
@@ -480,7 +494,7 @@ int main (int argc, char *argv[])
 	printf("Created RX ring of size %d \n", ring_size(rbuff));
 
 	dbg("Creating TX ring buffer");
-        if (ring_alloc(&sbuff, 512 * 512)) {
+        if (ring_alloc(&sbuff, SAMPLES_PER_PERIOD *4 * 512)) {
                 fprintf(stderr, "Unable to allocated TX ring: %s \n",
                         strerror(errno));
                 return EXIT_FAILURE;
