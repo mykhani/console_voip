@@ -82,7 +82,7 @@ int ring_write(struct ring *_ring, char *buff, int len)
 
 	/* check if the data would fit in */
 	if (_ring->count + len > _ring->size) {
-		dbg("No space. Waiting for data to be consumed");
+		dbg("Not enough space");
 		return -ENOMEM;
 	}
 
@@ -107,7 +107,7 @@ int ring_read(struct ring *_ring, char *buff, int len)
 	 * available istead of just greater than 0 to proceed with read?
 	 */
 	if (_ring->count < len) {
-		dbg("No data. Waiting for data to be produced");
+		dbg("Not enough data");
 		return -ENOMEM;
 	}
 	
