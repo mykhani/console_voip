@@ -166,6 +166,21 @@ char *voip_alloc_buf(snd_pcm_hw_params_t *params, snd_pcm_uframes_t *frames, int
 int voip_playback(snd_pcm_t *handle, snd_pcm_uframes_t frames, short buffer[])
 {
 	int ret;
+
+	static int prefill = 1;
+
+	if (prefill) {
+		int i;
+		prefill = 0;
+
+		/* prefill the output buffer to avoid underruns
+		 * i.e. we always have some data in the buffer */
+		/* TODO: Try to prefill buffer with silence */
+		for (i = 0; i < 2; i++) {
+			snd_pcm_writei(handle, buffer, frames);
+		}
+	}
+
 	/* write frames in one period to device */
 	while ((ret = snd_pcm_writei(handle, buffer, frames)) < 0) {
 		if (ret == -EAGAIN)
