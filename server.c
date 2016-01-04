@@ -47,15 +47,64 @@ pthread_cond_t capture_done, transmit_done;
 pthread_mutex_t rx_lock; // synchronize access to RX ring
 pthread_cond_t receive_done, playback_done;
 
+
+int verify_udp_connection(struct connection_data *_conn)
+{
+        /* send data over the UDP socket */
+	struct connection_data conn = *_conn;
+	int sockfd = conn.udp_sock;
+	struct sockaddr_in other, own;
+	char buffer[512];
+	int addrlen;
+	int rc;
+	
+        dbg("Verifying Tx UDP connection");
+
+	own = conn.own;
+	other = conn.other;
+	addrlen = sizeof other;
+	
+	/* Wait for audio request from other side.
+	 * This is to verify that UDP connection is successful */
+	dbg("Waiting for audio request from other side");
+	memset(buffer, 0, sizeof buffer);
+	if ((rc = recvfrom(sockfd, buffer, sizeof buffer, 0, 
+			(struct sockaddr *)&other, &addrlen)) < 0) {
+		fprintf(stderr,
+			"Unable to receive data \n");
+		return rc;
+	} 
+	printf("Received from other side: %s \n", buffer);
+	printf("Total bytes =  %d \n", strlen(buffer));
+	if (!strncmp("AUDIO_RQST", buffer, strlen(buffer))) {
+		printf("other side requesting data \n");
+		memset(buffer, 0, sizeof buffer);
+		sprintf(buffer, "ACK");
+		if ((rc = sendto(sockfd, buffer, sizeof buffer, 0,
+                        (struct sockaddr *)&other, addrlen)) < 0) {
+			fprintf(stderr,
+                                "Unable to send data to other side \n");
+                        return rc;
+		}
+		
+	} else {
+		fprintf(stderr, "Unknown request recevied \n");
+		return -EINVAL;
+	}
+
+	_conn->other = other;
+	return 0;
+}
+
 /* TODO: Move UDP socket creation to connection handler thread
  * Faced a bug when capture thread executed before send_audio
  * thread had established UDP socket and as a result, server
  * lost AUDIO_RQST from client 
  */
-void *send_audio(void *data)
+int send_audio(struct connection_data *_conn)
 {
         /* send data over the UDP socket */
-	struct connection_data conn = *((struct connection_data *)data);
+	struct connection_data conn = *_conn;
 	int sockfd = conn.udp_sock;
 	struct sockaddr_in other, own;
 	short audio_samples[SPEEX_FRAME_SIZE];
@@ -86,36 +135,7 @@ void *send_audio(void *data)
 	other = conn.other;
 
 	addrlen = sizeof other;
-	
-	/* Wait for audio request from other side.
-	 * This is to verify that UDP connection is successful */
-	dbg("Waiting for audio request from other side");
-	memset(buffer, 0, sizeof buffer);
-	if ((rc = recvfrom(sockfd, buffer, sizeof buffer, 0, 
-			(struct sockaddr *)&other, &addrlen)) < 0) {
-		fprintf(stderr,
-			"Unable to receive data \n");
-		goto send_sock_close;
-	} 
-	printf("Received from other side: %s \n", buffer);
-	printf("Total bytes =  %d \n", strlen(buffer));
-	if (!strncmp("AUDIO_RQST", buffer, strlen(buffer))) {
-		printf("other side requesting data \n");
-		memset(buffer, 0, sizeof buffer);
-		sprintf(buffer, "ACK");
-		if (sendto(sockfd, buffer, sizeof buffer, 0,
-                        (struct sockaddr *)&other, addrlen) < 0) {
-			fprintf(stderr,
-                                "Unable to send data to other side \n");
-                        goto send_sock_close;
-		}
 		
-	} else {
-		fprintf(stderr, "Unknown request recevied \n");
-		goto send_sock_close;
-	}
-
-	while(1) {
 		/* send data here */
 		/* TODO: How to end the send? */
 		//dbg("Sending audio data to other side \n");
@@ -127,16 +147,9 @@ void *send_audio(void *data)
 		 * can accomodate over 512 / 38 ~ 13 160 bytes speex frames. We are sending only
 		 * 5 (i.e 800 / 160) speex frames for our audio buffer of 800 frames */
 		for (i = 0, count = 0; i < 5; i++) {
-			pthread_mutex_lock(&tx_lock);
                 	/* if read is unsuccessful, wait for capture thread
                  	* to write audio data to sbuff */
-                	while ((rc = ring_read(sbuff, (char *)audio_samples, sizeof audio_samples)) < 0) {
-                        	pthread_cond_wait(&capture_done,&tx_lock);
-                	}
-                	/* signal the read complete, capture thread maybe waiting
-                 	* on it */
-			pthread_cond_signal(&transmit_done);
-			pthread_mutex_unlock(&tx_lock);
+                	rc = ring_read(sbuff, (char *)audio_samples, sizeof audio_samples);
 			printf("Read %d bytes from tx circular buffer \n", rc);	
 			speex_bits_reset(&bits);
 			/* Encode here */
@@ -151,23 +164,20 @@ void *send_audio(void *data)
 			//printf("Iteration no : %d \n", i + 1);
 		}
 		
-		if (sendto(sockfd, buffer, count, 0, (struct sockaddr *)&other, addrlen) < 0) {
+		if ((rc =sendto(sockfd, buffer, sizeof buffer, 0, (struct sockaddr *)&other, addrlen)) < 0) {
 			fprintf(stderr,
 		        	"Unable to send data to other side \n");
-			break;
 		} else 
-                	printf("Data sent: %d bytes\n", count);
+                	printf("Data sent: %d bytes\n", rc);
 		
 	
-	}
-
 	dbg("Freeing up speex resources");
 	/* Destroy the encoder state */
         speex_encoder_destroy(state);
         /* Destroy the bits-packing */
         speex_bits_destroy(&bits);
 	
-	
+#if 0	
 send_sock_close:
 	dbg("Closing UDP socket connection");
 	/* stop reception and transmission */
@@ -182,6 +192,7 @@ send_sock_close:
 audio_end:
 	 
         pthread_exit(NULL);
+#endif
 }
 
 void *capture_audio(void *data)
@@ -189,6 +200,8 @@ void *capture_audio(void *data)
 	/* This thread captures audio samples from audio device */
 	/* TODO: add mechanism to end this thread when desired,
 	 * perhaps by passing flags for indicating end of call? */
+	struct connection_data conn = *((struct connection_data *)data);
+
 	int ret;
 	int rc;
         unsigned int rate = 8000;
@@ -203,6 +216,14 @@ void *capture_audio(void *data)
         int buffer_size = SAMPLES_PER_PERIOD * sizeof(short);
 
         printf("rate is =%d \n", rate);
+
+	rc = verify_udp_connection(&conn);
+
+	if (rc < 0) {
+		fprintf(stderr,
+			"Failed to verify Tx UDP connection\n");
+		goto capture_failure;	
+	}
 
         ret = voip_init_pcm(&handle, &params, &buffer_size, &rate, RECORD);
 	if (ret) {
@@ -237,14 +258,18 @@ void *capture_audio(void *data)
 #endif
 	
 		printf("Read %d frames from capture source \n", rc);
-		pthread_mutex_lock(&tx_lock);
-                while(ring_write(sbuff, (char *)audio_samples, sizeof audio_samples )  < 0) {
-                        pthread_cond_wait(&transmit_done, &tx_lock);
-                }
-		pthread_cond_signal(&capture_done);
-                pthread_mutex_unlock(&tx_lock);
+		ring_write(sbuff, (char *)audio_samples, sizeof audio_samples);
+		rc = send_audio(&conn);
+
+		if (rc < 0) {
+			fprintf(stderr,
+				"Failed to transmit audio: %s \n",
+				strerror(rc));
+			/* TODO: Gracefully handle error condition, close socket etc */
+			break;		
+		}
         }
-	ret = 0;
+	ret = rc;
 
 capture_end:
         voip_end_pcm(handle);
@@ -415,16 +440,16 @@ void *connection_handler(void *data)
         }
 
 	conn.udp_sock = udp_sock;
-
+#if 0
         if (rc = pthread_create(&sender, NULL, send_audio, &conn)) {
                 fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
                 goto end;
         }
-
+#endif
 	/* instantiate audio capture thread */
         dbg("Creating a capture thread");
 
-	if (rc = pthread_create(&capture, NULL, capture_audio, NULL)) {
+	if (rc = pthread_create(&capture, NULL, capture_audio, &conn)) {
                 fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
                 goto end;
         }
@@ -447,7 +472,6 @@ void *connection_handler(void *data)
 #endif
 	dbg("Connection_handler waiting");
         /* wait for threads to finish their jobs */
-        pthread_join(sender, NULL);
         pthread_join(capture, NULL);
         pthread_join(receiver, NULL);
         pthread_join(playback, NULL);
