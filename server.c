@@ -13,7 +13,7 @@
 #define DEBUG
 
 #define PORT 8888
-#define BUFLEN 512 /* Max length of buffer */
+#define BUFLEN 512 /* Max length of buffer, for control data */
 
 /* We want to send 100ms of audio data in each 
  * UDP transfer. For 8000 sampling rate, 100ms of data means
@@ -47,52 +47,79 @@ pthread_cond_t capture_done, transmit_done;
 pthread_mutex_t rx_lock; // synchronize access to RX ring
 pthread_cond_t receive_done, playback_done;
 
-
-int verify_udp_connection(struct connection_data *_conn)
+int verify_udp_connection(struct connection_data *_conn, int role)
 {
         /* send data over the UDP socket */
 	struct connection_data conn = *_conn;
-	int sockfd = conn.udp_sock;
-	struct sockaddr_in other, own;
+	struct sockaddr_in own = conn.own;	
+	struct sockaddr_in other = conn.other;	
 	char buffer[512];
-	int addrlen;
-	int rc;
-	
-        dbg("Verifying Tx UDP connection");
+	int udp_sock_rx = conn.udp_sock_rx; /* Descriptor for UDP socket */
+	int udp_sock_tx = conn.udp_sock_tx;
 
-	own = conn.own;
-	other = conn.other;
-	addrlen = sizeof other;
+	/* receive data from socket, add to buffer */
+	int addrlen = sizeof other;
+	int rc;
+
+	if ( role == UDP_TX) {
+        dbg("Verifying TX UDP connection");
+		addrlen = sizeof other;
 	
-	/* Wait for audio request from other side.
-	 * This is to verify that UDP connection is successful */
-	dbg("Waiting for audio request from other side");
-	memset(buffer, 0, sizeof buffer);
-	if ((rc = recvfrom(sockfd, buffer, sizeof buffer, 0, 
-			(struct sockaddr *)&other, &addrlen)) < 0) {
-		fprintf(stderr,
-			"Unable to receive data \n");
-		return rc;
-	} 
-	printf("Received from other side: %s \n", buffer);
-	printf("Total bytes =  %d \n", strlen(buffer));
-	if (!strncmp("AUDIO_RQST", buffer, strlen(buffer))) {
-		printf("other side requesting data \n");
-		memset(buffer, 0, sizeof buffer);
-		sprintf(buffer, "ACK");
-		if ((rc = sendto(sockfd, buffer, sizeof buffer, 0,
+		/* sending init message to other end */
+		sprintf(buffer, "INIT");
+		if ((rc = sendto(udp_sock_tx, buffer, sizeof buffer, 0,
                         (struct sockaddr *)&other, addrlen)) < 0) {
 			fprintf(stderr,
-                                "Unable to send data to other side \n");
-                        return rc;
+				"Unable to send data to other side \n");
+			return rc;
 		}
+
+		/* Wait for ACK from other side.
+	 	 * This is to verify that UDP connection is successful */
+		dbg("Waiting for ACK from other side");
+		memset(buffer, 0, sizeof buffer);
+		if ((rc = recvfrom(udp_sock_tx, buffer, sizeof buffer, 0, 
+				(struct sockaddr *)&other, &addrlen)) < 0) {
+			fprintf(stderr,
+				"Unable to receive data \n");
+			return rc;
+		} 
+		printf("Received from other side: %s \n", buffer);
+		printf("Total bytes =  %d \n", strlen(buffer));
 		
-	} else {
-		fprintf(stderr, "Unknown request recevied \n");
-		return -EINVAL;
+		if (!strncmp("ACK", buffer, strlen(buffer))) {
+			printf("ACK received from other side \n");
+		} else {
+			fprintf(stderr, "Unknown request recevied \n");
+			return -EINVAL;
+		}
+	} else if (role == UDP_RX) {
+		dbg("Verifying RX UDP connection");
+		memset(buffer, 0, sizeof buffer);
+		if ((rc = recvfrom(udp_sock_rx, buffer, sizeof buffer, 0, 
+				(struct sockaddr *)&other, &addrlen)) < 0) {
+			fprintf(stderr,
+					"Unable to receive data \n");
+			return rc;
+		} 
+		printf("Received from other side: %s \n", buffer);
+		printf("Total bytes =  %d \n", strlen(buffer));
+		
+		if (!strncmp("INIT", buffer, strlen(buffer))) {
+			printf("ACK received from other side \n");
+		} else {
+			fprintf(stderr, "Unknown request recevied \n");
+			return -EINVAL;
+		}
+		sprintf(buffer, "ACK");
+		if ((rc = sendto(udp_sock_rx, buffer, sizeof buffer, 0,
+                        (struct sockaddr *)&other, addrlen)) < 0) {
+			fprintf(stderr,
+					"Unable to send data to other side \n");
+					return rc;
+		}
 	}
 
-	_conn->other = other;
 	return 0;
 }
 
@@ -103,9 +130,9 @@ int verify_udp_connection(struct connection_data *_conn)
  */
 int send_audio(struct connection_data *_conn)
 {
-        /* send data over the UDP socket */
+    /* send data over the UDP socket */
 	struct connection_data conn = *_conn;
-	int sockfd = conn.udp_sock;
+	int sockfd = conn.udp_sock_tx;
 	struct sockaddr_in other, own;
 	short audio_samples[SPEEX_FRAME_SIZE];
 	char buffer[512];
@@ -204,7 +231,7 @@ void *capture_audio(void *data)
 
 	int ret;
 	int rc;
-        unsigned int rate = 8000;
+	unsigned int rate = 8000;
         int size;
 	short audio_samples[SAMPLES_PER_PERIOD];
         int fd;
@@ -217,14 +244,6 @@ void *capture_audio(void *data)
 
         printf("rate is =%d \n", rate);
 
-	rc = verify_udp_connection(&conn);
-
-	if (rc < 0) {
-		fprintf(stderr,
-			"Failed to verify Tx UDP connection\n");
-		goto capture_failure;	
-	}
-
         ret = voip_init_pcm(&handle, &params, &buffer_size, &rate, RECORD);
 	if (ret) {
                 fprintf(stderr, "Unable to initialize PCM \n");
@@ -235,13 +254,6 @@ void *capture_audio(void *data)
         printf("Pointer to handle=%p \n", handle);
         printf("Pointer to params=%p \n", params);
 
-	fd = open("/home/ykhan/khan/voipp2/recording", 'r');
-
-	if (fd < 0) {
-		fprintf(stderr, "Error openening file to read: %s \n",
-			strerror(errno));
-		goto capture_failure;
-	}
 	printf("Size of buffer to accomodate period of data : %d \n", buffer_size);
 	while(1) {
                 rc = voip_capture(handle, buffer_size / frame_size, audio_samples);
@@ -280,88 +292,102 @@ capture_failure:
 
 void *receive_audio(void *data)
 {
+	struct connection_data conn = *((struct connection_data *)data);	
+	struct sockaddr_in other = conn.other; 
+	char buffer[512];
+	char compressed[SPEEX_FRAME_SIZE];
+	short audio_samples[SPEEX_FRAME_SIZE];	
+	int sockfd = conn.udp_sock_rx; /* Descriptor for UDP socket */
 	/* receive data from socket, add to buffer */
-	struct connection_data conn = *((struct connection_data *)data);
-        int sockfd = conn.udp_sock;
-        struct sockaddr_in other, own;
-        char buffer[SAMPLES_PER_PERIOD * 4];
-        int addrlen;
-        int rc;
-
+	int addrlen = sizeof other;
+	int rc;
 	/* variables for speex */
-	SpeexBits bits;
+        SpeexBits bits;
         void *state; /* For holding encoder state */
-        int quality;
-	
-	dbg("Preparing speex for compression");
-	state = speex_encoder_init(&speex_nb_mode);
-	/* Set the quality to 8 (15 kbps) */
-        quality = 8;
-        speex_encoder_ctl(state, SPEEX_SET_QUALITY, &quality);
+        int tmp;
+	int nbytes;
+	int i;
 
+	int ret;
+        unsigned int rate = 8000;
+        int size;
+        short playback_samples[SAMPLES_PER_PERIOD];
+        int fd;
+        int frame_size = 2;
+
+	snd_pcm_t *handle;
+        snd_pcm_hw_params_t *params;
+        /* write many data at a time to device */
+        /* the value of 5512 comes from aplay, investigate
+         * why it is so */
+	int buffer_size = SAMPLES_PER_PERIOD * sizeof(short);
+
+        printf("rate is =%d \n", rate);
+
+	dbg("Preparing audio playback");
+        ret = voip_init_pcm(&handle, &params, &buffer_size, &rate, PLAYBACK);
+        
+	if (ret < 0) {
+		fprintf(stderr,
+			"Failed to prepare audio system\n");
+		goto rcv_audio_end;
+	}
+
+	printf("Pointer address to handle=%p \n", &handle);
+        printf("Pointer to handle=%p \n", handle);
+        printf("Pointer to params=%p \n", params);
+	
+	dbg("Preparing speex for de-compression");
+        state = speex_decoder_init(&speex_nb_mode);
+	tmp = 1;
+        speex_decoder_ctl(state, SPEEX_SET_ENH, &tmp);
         speex_bits_init(&bits);
 
-	
-
-        dbg("Preparing to send audio over UDP socket");
-
-        own = conn.own;
-        other = conn.other;
-
-        addrlen = sizeof other;
-
-        /* Wait for audio request from other side.
-         * This is to verify that UDP connection is successful */
-
-        /* Check UDP connection state by sending AUDIO_RQST to other side */
-        dbg("Checking UDP connection status");
-        memset(buffer, 0, sizeof buffer);
-        sprintf(buffer, "AUDIO_RQST");
-        if ((sendto(sockfd, buffer, sizeof buffer, 0,
-                (struct sockaddr *)&other, addrlen)) < 0) {
-                fprintf(stderr, "Unable to send AUDIO_RQST \n");
-                goto rcv_sock_close;
-        } else {
-                dbg("AUDIO_RQST sent, waiting for response");
-                memset(buffer, 0, sizeof buffer);
-                if ( recvfrom(sockfd, buffer, sizeof buffer, 0,
-                                (struct sockaddr *)&other, &addrlen) < 0) {
-                        fprintf(stderr,
-                                "Unable to receive response: %s \n",
-                                strerror(errno));
-                        goto rcv_sock_close;
-	} else {
-                        printf("Received %s from other side \n", buffer);
-                        if (!strncmp("ACK", buffer, strlen(buffer))) {
-                                dbg("ACK received from other side");
-                        } else {
-                                fprintf(stderr, "Unknown response \n");
-                                goto rcv_sock_close;
-                        }
-                }
-        }
-        while(1) {
-                dbg("Audio reception started");
+	while(1) {
+		memset(audio_samples, 0, sizeof audio_samples);
+		memset(compressed, 0, sizeof compressed);
 		memset(buffer, 0, sizeof buffer);
-		if ( recvfrom(sockfd, buffer, sizeof buffer, 0,
-				(struct sockaddr *)&other, &addrlen) < 0) {
+		printf("Waiting for data\n");
+		if ((rc = recvfrom(sockfd, buffer, sizeof buffer, 0,
+				(struct sockaddr *)&other, &addrlen)) < 0) {
 			fprintf(stderr,
 				"Unable to receive audio data: %s \n",
 				strerror(errno));
 			goto rcv_sock_close;
 		}
-		pthread_mutex_lock(&rx_lock);
-		while (ring_write(rbuff, buffer, sizeof buffer) < 0 ) {
-			pthread_cond_wait(&playback_done, &rx_lock);
-		}
-		/* signal the reception of data for playback thread */
-		pthread_cond_signal(&receive_done);
-		pthread_mutex_unlock(&rx_lock);
+		printf("Received %d compressed bytes on UDP socket \n", rc);
+
+		for (i = 0; i < 5; i++) {
+			speex_bits_reset(&bits);
+			/* each encoded speex frame takes 38 bytes */
+			memcpy(compressed, buffer + i * 38, 38);
+
+                	speex_bits_read_from(&bits, compressed, 38);
 		
+			/* Decode here */
+                	speex_decode_int(state, &bits, audio_samples);	
+		
+			ring_write(rbuff, (char *)audio_samples, sizeof audio_samples);
+
+		}
+		ret = ring_read(rbuff, (char *)audio_samples, buffer_size);
+		if ( ret != buffer_size) {
+                        fprintf(stderr,
+                                "short read: read %d bytes \n", ret);
+                }
+                printf("Playing audio \n");
+                /* write frames in one period to device */
+                ret = voip_playback(handle, buffer_size / frame_size, audio_samples);
 	}
 
+        voip_end_pcm(handle);
+	/* Destroy the encoder state */
+        speex_decoder_destroy(state);
+        /* Destroy the bits-packing */
+        speex_bits_destroy(&bits);
+
 rcv_sock_close:
-        close(sockfd);
+	close(sockfd);	
 
 rcv_audio_end:
         pthread_exit(NULL);
@@ -374,8 +400,9 @@ void *connection_handler(void *data)
 	struct connection_data conn = *((struct connection_data *)data);
 	struct sockaddr_in own = conn.own;
 	struct sockaddr_in other = conn.other;
-	int sockfd = conn.sockfd;
-	int udp_sock;
+	int sockfd = conn.control_sock;
+	int udp_sock_rx;
+	int udp_sock_tx;
 
 	char ipstr[INET_ADDRSTRLEN]; /* holds the client ip address */
 	char buffer[BUFLEN];
@@ -429,23 +456,36 @@ void *connection_handler(void *data)
 		goto end;
 	}
 
-	if ((udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
+	if ((udp_sock_tx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
                 fprintf(stderr, "Unable to create TX UDP socket: %s \n", strerror(errno));
                 goto end;
         }
 
-        if (bind(udp_sock, (struct sockaddr *)&own, sizeof own) < 0) {
+        if (bind(udp_sock_tx, (struct sockaddr *)&own, sizeof own) < 0) {
                 fprintf(stderr, "Unable to bind TX UDP socket: %s \n", strerror(errno));
                 goto end;
         }
 
-	conn.udp_sock = udp_sock;
-#if 0
-        if (rc = pthread_create(&sender, NULL, send_audio, &conn)) {
-                fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
+	conn.udp_sock_tx = udp_sock_tx;
+	conn.udp_sock_rx = udp_sock_rx;
+
+	rc = verify_udp_connection(&conn, UDP_TX);
+
+        if (rc < 0) {
+                fprintf(stderr,
+                        "Failed to verify Tx UDP connection\n");
                 goto end;
         }
-#endif
+
+	rc = verify_udp_connection(&conn, UDP_RX);
+
+        if (rc < 0) {
+                fprintf(stderr,
+                        "Failed to verify Rx UDP connection\n");
+                goto end;
+        }
+
+
 	/* instantiate audio capture thread */
         dbg("Creating a capture thread");
 
@@ -453,7 +493,7 @@ void *connection_handler(void *data)
                 fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
                 goto end;
         }
-#if 0
+
         /* instantiate receiver thread */
 	dbg("Creating a receiver thread");
 	
@@ -461,20 +501,10 @@ void *connection_handler(void *data)
 		fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
 		goto end;
 	}
-	
-	/* instantiate playback thread */
-	dbg("Creating a playback thread");
-	
-	if (rc = pthread_create(&playback, NULL, play_audio, NULL )) {
-		fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
-		goto end;
-	}
-#endif
 	dbg("Connection_handler waiting");
         /* wait for threads to finish their jobs */
         pthread_join(capture, NULL);
         pthread_join(receiver, NULL);
-        pthread_join(playback, NULL);
 	
 	dbg("Exiting connection handler");
 	
@@ -577,7 +607,7 @@ int main (int argc, char *argv[])
 		 * handle call */
 		conn.own = own;
 		conn.other = other;
-		conn.sockfd = newsockfd;
+		conn.control_sock = newsockfd;
 		
 		pthread_create(&call, NULL, connection_handler, &conn);
 		/* wait for call to finish before accepting another call */

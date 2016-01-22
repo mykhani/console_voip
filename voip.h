@@ -8,15 +8,21 @@
 #define ALSA_PCM_NEW_HW_PARAMS_API
 
 enum {
+	UDP_TX,
+	UDP_RX
+};
+
+enum {
 	PLAYBACK,
 	RECORD
 };
 
 struct connection_data {
-        struct sockaddr_in own;
-        struct sockaddr_in other;
-        int sockfd;
-	int udp_sock;
+	struct sockaddr_in own;
+	struct sockaddr_in other;
+	int control_sock;
+	int udp_sock_tx;
+	int udp_sock_rx;
 };
 
 int voip_init_pcm(snd_pcm_t **handle, snd_pcm_hw_params_t **params,
