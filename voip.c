@@ -188,6 +188,7 @@ int voip_playback(snd_pcm_t *handle, snd_pcm_uframes_t frames, short buffer[])
 		else if (ret == -EPIPE) {
 	        	/* EPIPE means underrun */
 	        	fprintf(stderr, "underrun occurred \n");
+			prefill = 1;
 	        	snd_pcm_prepare(handle);
 		}
 	}
