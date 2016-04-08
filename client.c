@@ -12,7 +12,11 @@
 /* Enable debugging */
 #define DEBUG
 
-#define PORT 8888
+#define OWN_PORT 8889
+#define OTHER_PORT 8888
+#define UDP_TX_PORT 8889
+#define UDP_RX_PORT 8890
+
 #define BUFLEN 512 /* Max length of buffer, for control data */
 
 /* We want to send 100ms of audio data in each 
@@ -52,7 +56,8 @@ int verify_udp_connection(struct connection_data *_conn, int role)
         /* send data over the UDP socket */
 	struct connection_data conn = *_conn;
 	struct sockaddr_in own = conn.own;	
-	struct sockaddr_in other = conn.other;	
+	struct sockaddr_in other = conn.other;
+
 	char buffer[512];
 	int udp_sock_rx = conn.udp_sock_rx; /* Descriptor for UDP socket */
 	int udp_sock_tx = conn.udp_sock_tx;
@@ -411,22 +416,27 @@ void *connection_handler(void *data)
         own.sin_addr.s_addr = INADDR_ANY;
         /* convert from host to network byte order */
         /* htons : host to network short */
-        own.sin_port = htons(PORT);
+        own.sin_port = htons(OWN_PORT);
+
+	if ((udp_sock_rx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
+                fprintf(stderr, "Unable to create RX UDP socket: %s \n", strerror(errno));
+                goto failure;
+        }
+
+	if (bind(udp_sock_rx, (struct sockaddr *)&own, sizeof own) < 0) {
+                fprintf(stderr, "Unable to bind RX UDP socket: %s \n", strerror(errno));
+                goto failure;
+        }
 
 	if ((udp_sock_tx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
                 fprintf(stderr, "Unable to create TX UDP socket: %s \n", strerror(errno));
                 goto failure;
         }
 
-	if (bind(udp_sock_tx, (struct sockaddr *)&own, sizeof own) < 0) {
-                fprintf(stderr, "Unable to bind TX UDP socket: %s \n", strerror(errno));
-                goto failure;
-        }
-
 	conn.udp_sock_tx = udp_sock_tx;
 	conn.udp_sock_rx = udp_sock_rx;
 
-	rc = verify_udp_connection(&conn, UDP_RX);
+	rc = verify_udp_connection(&conn, UDP_TX);
 
         if (rc < 0) {
                 fprintf(stderr,
@@ -434,7 +444,7 @@ void *connection_handler(void *data)
                 goto failure;
         }
 
-	rc = verify_udp_connection(&conn, UDP_TX);
+	rc = verify_udp_connection(&conn, UDP_RX);
 
         if (rc < 0) {
                 fprintf(stderr,
@@ -445,7 +455,6 @@ void *connection_handler(void *data)
 
 	/* instantiate audio capture thread */
         dbg("Creating a capture thread");
-
 	if (rc = pthread_create(&capture, NULL, capture_audio, &conn)) {
                 fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
                 goto failure;
@@ -454,19 +463,12 @@ void *connection_handler(void *data)
         /* instantiate receiver thread */
 	dbg("Creating a receiver thread");
 	
-	if ((udp_sock_rx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
-                fprintf(stderr, "Unable to create RX UDP socket: %s \n", strerror(errno));
-                goto failure;
-        }
-
-	conn.udp_sock_rx = udp_sock_rx;
-
 	if (rc = pthread_create(&receiver, NULL, receive_audio, &conn)) {
 		fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
 		goto failure;
 	}
 	dbg("Connection_handler waiting");
-        pthread_join(receiver, NULL);
+	pthread_join(receiver, NULL);
         pthread_join(capture, NULL);
 	
 	dbg("Exiting connection handler");
@@ -549,7 +551,7 @@ int main (int argc, char *argv[])
 	server.sin_family = AF_INET;
 	/* convert from host to network byte order */
 	/* htons : host to network short */
-	server.sin_port = htons(PORT);
+	server.sin_port = htons(OTHER_PORT);
 	/* set server ip address */	
 	if (inet_aton(server_ip, &server.sin_addr) == 0) {
 		fprintf(stderr, "inet_aton() failed \n");

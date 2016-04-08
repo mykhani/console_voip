@@ -13,6 +13,9 @@
 #define DEBUG
 
 #define PORT 8888
+#define TX_UDP_PORT 8889
+#define RX_UDP_PORT 8890
+
 #define BUFLEN 512 /* Max length of buffer, for control data */
 
 /* We want to send 100ms of audio data in each 
@@ -61,13 +64,14 @@ int verify_udp_connection(struct connection_data *_conn, int role)
 	int addrlen = sizeof other;
 	int rc;
 
-	if ( role == UDP_TX) {
-        dbg("Verifying TX UDP connection");
+	if ( role == UDP_RX) {
+        dbg("Verifying RX UDP connection");
 		addrlen = sizeof other;
+		other.sin_port = htons(8889);
 	
 		/* sending init message to other end */
 		sprintf(buffer, "INIT");
-		if ((rc = sendto(udp_sock_tx, buffer, sizeof buffer, 0,
+		if ((rc = sendto(udp_sock_rx, buffer, sizeof buffer, 0,
                         (struct sockaddr *)&other, addrlen)) < 0) {
 			fprintf(stderr,
 				"Unable to send data to other side \n");
@@ -78,7 +82,7 @@ int verify_udp_connection(struct connection_data *_conn, int role)
 	 	 * This is to verify that UDP connection is successful */
 		dbg("Waiting for ACK from other side");
 		memset(buffer, 0, sizeof buffer);
-		if ((rc = recvfrom(udp_sock_tx, buffer, sizeof buffer, 0, 
+		if ((rc = recvfrom(udp_sock_rx, buffer, sizeof buffer, 0, 
 				(struct sockaddr *)&other, &addrlen)) < 0) {
 			fprintf(stderr,
 				"Unable to receive data \n");
@@ -93,10 +97,10 @@ int verify_udp_connection(struct connection_data *_conn, int role)
 			fprintf(stderr, "Unknown request recevied \n");
 			return -EINVAL;
 		}
-	} else if (role == UDP_RX) {
-		dbg("Verifying RX UDP connection");
+	} else if (role == UDP_TX) {
+		dbg("Verifying TX UDP connection");
 		memset(buffer, 0, sizeof buffer);
-		if ((rc = recvfrom(udp_sock_rx, buffer, sizeof buffer, 0, 
+		if ((rc = recvfrom(udp_sock_tx, buffer, sizeof buffer, 0, 
 				(struct sockaddr *)&other, &addrlen)) < 0) {
 			fprintf(stderr,
 					"Unable to receive data \n");
@@ -112,7 +116,7 @@ int verify_udp_connection(struct connection_data *_conn, int role)
 			return -EINVAL;
 		}
 		sprintf(buffer, "ACK");
-		if ((rc = sendto(udp_sock_rx, buffer, sizeof buffer, 0,
+		if ((rc = sendto(udp_sock_tx, buffer, sizeof buffer, 0,
                         (struct sockaddr *)&other, addrlen)) < 0) {
 			fprintf(stderr,
 					"Unable to send data to other side \n");
@@ -132,7 +136,7 @@ int send_audio(struct connection_data *_conn)
 {
     /* send data over the UDP socket */
 	struct connection_data conn = *_conn;
-	int sockfd = conn.udp_sock_tx;
+	int sockfd = conn.udp_sock_rx;
 	struct sockaddr_in other, own;
 	short audio_samples[SPEEX_FRAME_SIZE];
 	char buffer[512];
@@ -160,6 +164,7 @@ int send_audio(struct connection_data *_conn)
 
 	own = conn.own;
 	other = conn.other;
+	other.sin_port = htons(8889);
 
 	addrlen = sizeof other;
 		
@@ -297,7 +302,7 @@ void *receive_audio(void *data)
 	char buffer[512];
 	char compressed[SPEEX_FRAME_SIZE];
 	short audio_samples[SPEEX_FRAME_SIZE];	
-	int sockfd = conn.udp_sock_rx; /* Descriptor for UDP socket */
+	int sockfd = conn.udp_sock_tx; /* Descriptor for UDP socket */
 	/* receive data from socket, add to buffer */
 	int addrlen = sizeof other;
 	int rc;
@@ -466,6 +471,11 @@ void *connection_handler(void *data)
                 goto end;
         }
 
+	if ((udp_sock_rx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
+                fprintf(stderr, "Unable to create RX UDP socket: %s \n", strerror(errno));
+                goto end;
+        }
+
 	conn.udp_sock_tx = udp_sock_tx;
 	conn.udp_sock_rx = udp_sock_rx;
 
@@ -485,7 +495,6 @@ void *connection_handler(void *data)
                 goto end;
         }
 
-
 	/* instantiate audio capture thread */
         dbg("Creating a capture thread");
 
@@ -493,7 +502,6 @@ void *connection_handler(void *data)
                 fprintf(stderr, "error: pthread create failed, rc = %d \n", rc );
                 goto end;
         }
-
         /* instantiate receiver thread */
 	dbg("Creating a receiver thread");
 	
@@ -503,7 +511,7 @@ void *connection_handler(void *data)
 	}
 	dbg("Connection_handler waiting");
         /* wait for threads to finish their jobs */
-        pthread_join(capture, NULL);
+	pthread_join(capture, NULL);
         pthread_join(receiver, NULL);
 	
 	dbg("Exiting connection handler");
